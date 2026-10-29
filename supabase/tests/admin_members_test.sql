@@ -124,12 +124,14 @@ select admin_tests.returns('the only policy is SELECT for authenticated',
       from pg_policies where schemaname = 'public' and tablename = 'admin_members' $q$,
   'Users can see their own admin membership SELECT authenticated');
 
-select admin_tests.returns('catalogue tables are still read-only for anon and authenticated',
-  $q$ select string_agg(r || ' ' || t || ' ' || p, ', ')
-      from unnest(array['anon', 'authenticated']) r,
-           unnest(array['public.products', 'public.product_variants', 'public.product_images']) t,
+-- Catalogue write access for verified admins (membership + aal2) is added by
+-- 20261029120000_admin_product_management.sql and tested in
+-- product_management_test.sql. Visitors still can't write at all.
+select admin_tests.returns('catalogue tables are still read-only for anon',
+  $q$ select string_agg(t || ' ' || p, ', ')
+      from unnest(array['public.products', 'public.product_variants', 'public.product_images']) t,
            unnest(array['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) p
-      where has_table_privilege(r, t, p) $q$, '');
+      where has_table_privilege('anon', t, p) $q$, '');
 
 -- ---------------------------------------------------------------------------
 -- What each kind of user can see and do

@@ -2,6 +2,7 @@ import "server-only";
 import { cacheLife, cacheTag } from "next/cache";
 import { getSupabase } from "@/lib/supabase/server";
 import { CONDITIONS, DEPARTMENT_ORDER, STYLE_LABELS } from "./labels";
+import { productPhotoSrc } from "./photos";
 import type { Condition, Department, ItemStatus, Product, Style } from "./types";
 
 /*
@@ -13,8 +14,9 @@ import type { Condition, Department, ItemStatus, Product, Style } from "./types"
  * it are prerendered with the catalogue as it was at build time, then
  * refreshed in the background at most once a minute while they get traffic;
  * after an hour without traffic the next request waits for fresh data.
- * Browsers may reuse a page for up to 5 minutes. Call
- * revalidateTag(CATALOGUE_TAG) after editing products to refresh at once.
+ * Browsers may reuse a page for up to 5 minutes. The admin actions
+ * (app/admin/products/actions.ts) call updateTag(CATALOGUE_TAG) after every
+ * product change to refresh it at once.
  */
 
 export const CATALOGUE_TAG = "catalogue";
@@ -31,7 +33,7 @@ const PRODUCT_COLUMNS = `
   id, item_code, slug, name, brand, department, styles, item_status, condition,
   condition_notes, colour, description, price_paisa, listed_at,
   product_variants (sku, size_eu, stock),
-  product_images (src, alt, width, height, sort_order, focus, shows_defect)
+  product_images (src, storage_path, alt, width, height, sort_order, focus, shows_defect)
 `;
 
 type ProductRow = {
@@ -52,7 +54,8 @@ type ProductRow = {
   // PostgREST returns numeric columns as JSON numbers; strings are tolerated.
   product_variants: { sku: string; size_eu: number | string; stock: number }[];
   product_images: {
-    src: string;
+    src: string | null;
+    storage_path: string | null;
     alt: string;
     width: number;
     height: number;
@@ -97,7 +100,8 @@ function toProduct(row: ProductRow): Product {
     images: [...row.product_images]
       .sort((a, b) => a.sort_order - b.sort_order)
       .map((image) => ({
-        src: image.src,
+        // Uploaded photos are served from Storage by app/product-photos.
+        src: image.storage_path ? productPhotoSrc(image.storage_path) : (image.src ?? ""),
         alt: image.alt,
         width: image.width,
         height: image.height,

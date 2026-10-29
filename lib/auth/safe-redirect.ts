@@ -39,3 +39,8 @@ export function safeAdminPath(value: unknown): string {
 export function mfaPath(next: string): string {
   return next === ADMIN_HOME ? ADMIN_MFA : `${ADMIN_MFA}?next=${encodeURIComponent(next)}`;
 }
+
+/** The login page, returning to `next` (a safeAdminPath) afterwards. */
+export function loginPath(next: string): string {
+  return next === ADMIN_HOME ? ADMIN_LOGIN : `${ADMIN_LOGIN}?next=${encodeURIComponent(next)}`;
+}

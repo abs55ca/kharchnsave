@@ -2,7 +2,7 @@ import "server-only";
 import { isAuthApiError, isAuthSessionMissingError, type Factor } from "@supabase/supabase-js";
 import { redirect, unstable_rethrow } from "next/navigation";
 import { createSessionClient } from "@/lib/supabase/session";
-import { ADMIN_LOGIN, ADMIN_MFA } from "./safe-redirect";
+import { ADMIN_LOGIN, ADMIN_MFA, loginPath, mfaPath, safeAdminPath } from "./safe-redirect";
 
 /*
  * Admin authorization, checked on the server for every admin page and
@@ -131,4 +131,31 @@ export async function requireAdmin() {
   if (access.status === "signed-out") redirect(ADMIN_LOGIN);
   if (access.status === "mfa-required") redirect(ADMIN_MFA);
   throw new Error("Admin access required.");
+}
+
+export type AdminSessionClient = SessionClient;
+
+/**
+ * For admin data reads and writes: the verified admin (member + aal2) and
+ * their session client, whose requests the database also checks with the
+ * same rules (RLS: membership AND aal2). Anyone else gets `supabase: null`
+ * and their access status, so the caller can explain what's wrong.
+ */
+export async function getAdminClient() {
+  const { access, supabase } = await checkAccess();
+  if (access.status === "admin" && supabase) return { access, supabase };
+  return { access, supabase: null };
+}
+
+/**
+ * For admin pages that show product data. Signed-out visitors go to the
+ * login page and unverified sessions to the two-step page, both returning to
+ * `path` afterwards. Members who aren't verified admins never get a client.
+ */
+export async function getAdminPageClient(path: string) {
+  const result = await getAdminClient();
+  const next = safeAdminPath(path);
+  if (result.access.status === "signed-out") redirect(loginPath(next));
+  if (result.access.status === "mfa-required") redirect(mfaPath(next));
+  return result;
 }

@@ -55,6 +55,24 @@ begin
 end;
 $$;
 
+-- Requires `statement` to be refused (insufficient privilege or row-level
+-- security, SQLSTATE 42501) or to change no rows at all.
+create function catalogue_tests.refused(label text, statement text)
+returns void language plpgsql as $$
+declare
+  changed integer;
+begin
+  begin
+    execute statement;
+    get diagnostics changed = row_count;
+  exception when insufficient_privilege then
+    raise notice 'PASS %', label;
+    return;
+  end;
+  perform catalogue_tests.check(label, changed = 0, format('%s row(s) changed', changed));
+end;
+$$;
+
 -- Requires `statement` to fail with SQLSTATE `expected_state` (and, if given,
 -- the named constraint or index).
 create function catalogue_tests.throws(
@@ -94,17 +112,17 @@ grant execute on all functions in schema catalogue_tests to anon, authenticated;
 -- ---------------------------------------------------------------------------
 
 insert into public.products
-  (item_code, slug, name, brand, department, styles, item_status, condition, colour, price_paisa, publication_status, listed_at)
+  (item_code, slug, name, brand, department, styles, item_status, condition, colour, price_paisa, publication_status, listed_at, description)
 values
-  ('TEST-PUB-PL', 'test-published-preloved', 'Test pair', 'Testbrand', 'men', '{sneakers}', 'preloved', 'good', 'Black', 500000, 'published', '2026-10-01'),
-  ('TEST-PUB-NEW', 'test-published-new', 'Test kids style', 'Testbrand', 'kids', '{casual}', 'new', 'new', 'Red', 250000, 'published', '2026-10-01'),
-  ('TEST-DRAFT', 'test-draft', 'Test draft', 'Testbrand', 'women', '{heels}', 'preloved', 'excellent', 'Ivory', 700000, 'draft', null),
-  ('TEST-ARCHIVED', 'test-archived', 'Test archived', 'Testbrand', 'kids', '{boots}', 'new', 'new', 'Brown', 300000, 'archived', '2026-09-01'),
+  ('TEST-PUB-PL', 'test-published-preloved', 'Test pair', 'Testbrand', 'men', '{sneakers}', 'preloved', 'good', 'Black', 500000, 'published', '2026-10-01', 'Test description'),
+  ('TEST-PUB-NEW', 'test-published-new', 'Test kids style', 'Testbrand', 'kids', '{casual}', 'new', 'new', 'Red', 250000, 'published', '2026-10-01', 'Test description'),
+  ('TEST-DRAFT', 'test-draft', 'Test draft', 'Testbrand', 'women', '{heels}', 'preloved', 'excellent', 'Ivory', 700000, 'draft', null, 'Test description'),
+  ('TEST-ARCHIVED', 'test-archived', 'Test archived', 'Testbrand', 'kids', '{boots}', 'new', 'new', 'Brown', 300000, 'archived', '2026-09-01', 'Test description'),
   -- Helpers for the constraint tests below; drafts, so they never affect visibility counts.
-  ('TEST-PL-EMPTY', 'test-preloved-empty', 'Test pair, no size yet', 'Testbrand', 'men', '{}', 'preloved', 'good', 'Grey', 100000, 'draft', null),
-  ('TEST-NEW-TWO', 'test-new-two-sizes', 'Test two sizes', 'Testbrand', 'kids', '{}', 'new', 'new', 'Blue', 100000, 'draft', null),
-  ('TEST-NEW-THREE', 'test-new-stock-three', 'Test three in stock', 'Testbrand', 'kids', '{}', 'new', 'new', 'Pink', 100000, 'draft', null),
-  ('TEST-NEW-ONE', 'test-new-single', 'Test single pair', 'Testbrand', 'kids', '{}', 'new', 'new', 'Green', 100000, 'draft', null);
+  ('TEST-PL-EMPTY', 'test-preloved-empty', 'Test pair, no size yet', 'Testbrand', 'men', '{}', 'preloved', 'good', 'Grey', 100000, 'draft', null, 'Test description'),
+  ('TEST-NEW-TWO', 'test-new-two-sizes', 'Test two sizes', 'Testbrand', 'kids', '{}', 'new', 'new', 'Blue', 100000, 'draft', null, 'Test description'),
+  ('TEST-NEW-THREE', 'test-new-stock-three', 'Test three in stock', 'Testbrand', 'kids', '{}', 'new', 'new', 'Pink', 100000, 'draft', null, 'Test description'),
+  ('TEST-NEW-ONE', 'test-new-single', 'Test single pair', 'Testbrand', 'kids', '{}', 'new', 'new', 'Green', 100000, 'draft', null, 'Test description');
 
 insert into public.product_variants (product_id, item_status, sku, size_eu, stock)
 select p.id, p.item_status, v.sku, v.size_eu, v.stock
@@ -365,20 +383,33 @@ select catalogue_tests.returns('anon and authenticated can SELECT all three tabl
            unnest(array['public.products', 'public.product_variants', 'public.product_images']) t
       where not has_table_privilege(r, t, 'SELECT') $q$, '');
 
-select catalogue_tests.returns('anon and authenticated have no write privileges at all',
-  $q$ select string_agg(r || ' ' || t || ' ' || p, ', ' order by r, t, p)
-      from unnest(array['anon', 'authenticated']) r,
-           unnest(array['public.products', 'public.product_variants', 'public.product_images']) t,
+select catalogue_tests.returns('anon has no write privileges at all',
+  $q$ select string_agg(t || ' ' || p, ', ' order by t, p)
+      from unnest(array['public.products', 'public.product_variants', 'public.product_images']) t,
            unnest(array['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) p
-      where has_table_privilege(r, t, p)
-         or (p in ('INSERT', 'UPDATE', 'REFERENCES') and has_any_column_privilege(r, t, p)) $q$, '');
+      where has_table_privilege('anon', t, p)
+         or (p in ('INSERT', 'UPDATE', 'REFERENCES') and has_any_column_privilege('anon', t, p)) $q$, '');
 
-select catalogue_tests.returns('every catalogue policy is SELECT-only, for anon/authenticated',
+-- Signed-in users hold the column grants that verified admins write through
+-- (20261029120000_admin_product_management.sql); RLS limits them to verified
+-- admins, which product_management_test.sql checks in detail.
+select catalogue_tests.returns('authenticated can never delete or truncate products, or use REFERENCES/TRIGGER',
+  $q$ select string_agg(t || ' ' || p, ', ' order by t, p)
+      from unnest(array['public.products', 'public.product_variants', 'public.product_images']) t,
+           unnest(array['DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) p
+      where (has_table_privilege('authenticated', t, p) or (p = 'REFERENCES' and has_any_column_privilege('authenticated', t, p)))
+        and not (p = 'DELETE' and t in ('public.product_variants', 'public.product_images')) $q$, '');
+
+select catalogue_tests.returns('anon policies are SELECT-only; every write policy requires a verified admin',
   $q$ select string_agg(tablename || ': ' || policyname, ', ')
       from pg_policies
       where schemaname = 'public'
         and tablename in ('products', 'product_variants', 'product_images')
-        and (cmd <> 'SELECT' or not roles <@ array['anon', 'authenticated']::name[]) $q$, '');
+        and (
+          (cmd <> 'SELECT' and (roles <> array['authenticated']::name[]
+            or coalesce(qual, '') || coalesce(with_check, '') not like '%is_catalogue_admin()%'))
+          or not roles <@ array['anon', 'authenticated']::name[]
+        ) $q$, '');
 
 select catalogue_tests.returns('API roles cannot execute the updated_at trigger function',
   $q$ select string_agg(r, ', ') from unnest(array['anon', 'authenticated']) r
@@ -418,33 +449,31 @@ begin
   perform catalogue_tests.returns(r || ': helper drafts are hidden too',
     $q$ select count(*)::text from public.products where slug like 'test-%' and publication_status <> 'published' $q$, '0');
 
-  -- Writes are refused by privileges (permission denied), before RLS is reached.
-  perform catalogue_tests.throws(r || ': cannot insert products',
+  -- Writes are refused (by privileges for anon; by privileges or row-level
+  -- security for signed-in users who aren't verified admins) or change nothing.
+  perform catalogue_tests.refused(r || ': cannot insert products',
     $q$ insert into public.products (item_code, slug, name, brand, department, item_status, condition, colour, price_paisa, publication_status, listed_at)
-        values ('TEST-HACK', 'test-hack', 'X', 'X', 'men', 'preloved', 'good', 'Black', 100, 'published', '2026-10-01') $q$,
-    '42501');
-  perform catalogue_tests.throws(r || ': cannot update products',
-    $q$ update public.products set price_paisa = 1 where slug = 'test-published-preloved' $q$, '42501');
-  perform catalogue_tests.throws(r || ': cannot delete products',
-    $q$ delete from public.products where slug = 'test-published-preloved' $q$, '42501');
-  perform catalogue_tests.throws(r || ': cannot truncate products',
-    $q$ truncate public.products cascade $q$, '42501');
-  perform catalogue_tests.throws(r || ': cannot insert sizes',
+        values ('TEST-HACK', 'test-hack', 'X', 'X', 'men', 'preloved', 'good', 'Black', 100, 'published', '2026-10-01') $q$);
+  perform catalogue_tests.refused(r || ': cannot update products',
+    $q$ update public.products set price_paisa = 1 where slug = 'test-published-preloved' $q$);
+  perform catalogue_tests.refused(r || ': cannot delete products',
+    $q$ delete from public.products where slug = 'test-published-preloved' $q$);
+  perform catalogue_tests.refused(r || ': cannot truncate products',
+    $q$ truncate public.products cascade $q$);
+  perform catalogue_tests.refused(r || ': cannot insert sizes',
     $q$ insert into public.product_variants (product_id, item_status, sku, size_eu, stock)
-        select id, item_status, 'TEST-HACK-22', 22, 9 from public.products where slug = 'test-published-new' $q$,
-    '42501');
-  perform catalogue_tests.throws(r || ': cannot change stock',
-    $q$ update public.product_variants set stock = 99 where sku = 'TEST-PUB-NEW-20' $q$, '42501');
-  perform catalogue_tests.throws(r || ': cannot delete sizes',
-    $q$ delete from public.product_variants where sku = 'TEST-PUB-NEW-20' $q$, '42501');
-  perform catalogue_tests.throws(r || ': cannot insert images',
+        select id, item_status, 'TEST-HACK-22', 22, 9 from public.products where slug = 'test-published-new' $q$);
+  perform catalogue_tests.refused(r || ': cannot change stock',
+    $q$ update public.product_variants set stock = 99 where sku = 'TEST-PUB-NEW-20' $q$);
+  perform catalogue_tests.refused(r || ': cannot delete sizes',
+    $q$ delete from public.product_variants where sku = 'TEST-PUB-NEW-20' $q$);
+  perform catalogue_tests.refused(r || ': cannot insert images',
     $q$ insert into public.product_images (product_id, sort_order, src, alt, width, height)
-        select id, 9, '/images/test/hack.jpg', 'X', 800, 800 from public.products where slug = 'test-published-new' $q$,
-    '42501');
-  perform catalogue_tests.throws(r || ': cannot update images',
-    $q$ update public.product_images set alt = 'X' where src = '/images/test/published-new.jpg' $q$, '42501');
-  perform catalogue_tests.throws(r || ': cannot delete images',
-    $q$ delete from public.product_images where src = '/images/test/published-new.jpg' $q$, '42501');
+        select id, 9, '/images/test/hack.jpg', 'X', 800, 800 from public.products where slug = 'test-published-new' $q$);
+  perform catalogue_tests.refused(r || ': cannot update images',
+    $q$ update public.product_images set alt = 'X' where src = '/images/test/published-new.jpg' $q$);
+  perform catalogue_tests.refused(r || ': cannot delete images',
+    $q$ delete from public.product_images where src = '/images/test/published-new.jpg' $q$);
 end;
 $$;
 
@@ -459,8 +488,8 @@ select catalogue_tests.public_access('authenticated');
 reset role;
 
 -- ---------------------------------------------------------------------------
--- Defence in depth: even if write privileges were granted by mistake, RLS has
--- no write policies, so nothing could be changed.
+-- Defence in depth: even if write privileges were granted by mistake, no
+-- write policy lets anyone but a verified admin change anything.
 -- ---------------------------------------------------------------------------
 
 grant insert, update, delete on public.products, public.product_variants, public.product_images
