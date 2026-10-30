@@ -3,7 +3,9 @@ import { Montserrat, Poppins } from "next/font/google";
 import { CartDrawer } from "@/components/cart/cart-drawer";
 import { CartProvider } from "@/components/cart/cart-provider";
 import { AnnouncementBar, SiteHeader } from "@/components/layout/site-header";
+import { SiteChrome } from "@/components/layout/site-chrome";
 import { SiteFooter } from "@/components/layout/site-footer";
+import { SITE_ORIGIN } from "@/lib/links";
 import { SITE } from "@/lib/site";
 import "./globals.css";
 
@@ -20,6 +22,8 @@ const poppins = Poppins({
 });
 
 export const metadata: Metadata = {
+  // Absolute URLs in metadata (social preview images) use the public address.
+  metadataBase: new URL(SITE_ORIGIN),
   title: {
     default: `${SITE.name} — ${SITE.tagline}`,
     template: `%s | ${SITE.name}`,
@@ -48,12 +52,16 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           >
             Skip to main content
           </a>
-          <AnnouncementBar />
-          <SiteHeader />
+          <SiteChrome>
+            <AnnouncementBar />
+            <SiteHeader />
+          </SiteChrome>
           <main id="main-content" tabIndex={-1} className="flex-1 focus:outline-none">
             {children}
           </main>
-          <SiteFooter />
+          <SiteChrome>
+            <SiteFooter />
+          </SiteChrome>
           <CartDrawer />
         </CartProvider>
       </body>

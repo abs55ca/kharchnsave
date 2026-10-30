@@ -1,8 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /*
- * Admin browser tests: `npm run test:e2e`. See README, "Barcodes and labels",
- * for the full set-up. In short, they need:
+ * Browser and HTTP tests: `npm run test:e2e`, against E2E_BASE_URL.
+ *
+ * e2e/links.spec.ts (/qr and /links) only needs a running build.
+ *
+ * e2e/scan.spec.ts (admin scan page; see README, "Barcodes and labels") needs:
  *
  * - a LOCAL Supabase stack (Docker) with every migration applied, the dev
  *   fixtures (supabase/seeds/dev_catalogue_fixtures.sql) and
@@ -10,8 +13,8 @@ import { defineConfig, devices } from "@playwright/test";
  * - the site built and running against that local stack (E2E_BASE_URL);
  * - E2E_ADMIN_EMAIL, E2E_ADMIN_PASSWORD and E2E_ADMIN_TOTP_SECRET.
  *
- * Without those variables every test is skipped. The tests only read data
- * (and sign in); never point them at the hosted project anyway.
+ * Without those variables its tests are skipped. They only read data (and
+ * sign in); never point them at the hosted project anyway.
  */
 export default defineConfig({
   testDir: "e2e",

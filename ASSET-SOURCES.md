@@ -12,6 +12,7 @@ and should be replaced with photos of the actual pairs before launch.
 | `/images/brand/kharch-n-save-logo.svg` | `Logo/Logo-01.svg` from the brand files | viewBox cropped to the artwork; paths unchanged. |
 | `/images/brand/kharch-n-save-logo-reverse.svg` | `Logo/Logo-01.svg` | Same artwork with the forest-green fill (`#163a2c`) switched to white for dark backgrounds. |
 | `app/icon.png`, `app/apple-icon.png` | `Logo/Logo-03.png` (K mark) | Padded onto a white square. |
+| `lib/brand/k-mark.ts` (K mark on `/links`, its social preview and the merchandise QR code in `merch/qr/`) | `Logo/Logo-03.svg` from the brand files | The green K and lime tag paths copied unchanged; viewBox cropped to the artwork. Two tiny unstyled paths from the Illustrator export (no fill colour, so they render as black specks) are left out. |
 | `/images/departments/men.png`, `men-tilted.png` | Cut-outs supplied by Kharch n Save as `men.png` / `men-tilted.png` | Each pair cropped to a shared box and resized to 800 px wide. Shows Nike Lunarglide running shoes. |
 | `/images/departments/women.png`, `women-tilted.png` | Supplied as `women.png` / `women-tilted.png` | As above. Shows ASICS running shoes. |
 | `/images/departments/kids.png`, `kids-tilted.png` | Supplied as `kid.png` / `kid-tilted.png` | As above. Shows Nike kids' running shoes. |

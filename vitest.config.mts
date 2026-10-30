@@ -1,8 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
-// Unit tests for plain TypeScript modules (no React rendering, no network,
-// no database): `npm test`. Browser tests are separate (playwright.config.ts).
+// Unit tests (no network, no database): `npm test`. Synchronous pages are
+// rendered to HTML; browser tests are separate (playwright.config.ts).
 export default defineConfig({
   resolve: {
     // tsconfig.json's "@/*" path.
@@ -10,6 +10,8 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["lib/**/*.test.ts"],
+    include: ["lib/**/*.test.ts", "app/**/*.test.{ts,tsx}"],
+    // The QR tests render and decode several large images.
+    testTimeout: 60_000,
   },
 });

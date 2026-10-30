@@ -48,6 +48,7 @@ npm start          # serve the production build
 | `/admin/products`, `/admin/products/new`, `/admin/products/[id]` | Product list (search, status filters, pages), create and edit screens, photos, publishing (see [Product management](#product-management)) |
 | `/product-photos/[productId]/[file]` | Shoppers' view of uploaded product photos (published products only) |
 | `/admin/scan`, `/admin/products/[id]/labels` | In-store barcode lookup and label printing (see [Barcodes and labels](#barcodes-and-labels)) |
+| `/links`, `/qr` | Links page (Instagram, Facebook, shop) and the permanent merchandise QR address that redirects to it (see [Links page and merchandise QR code](#links-page-and-merchandise-qr-code)) |
 
 ### Code layout
 
@@ -68,6 +69,9 @@ lib/
                         barcode lookups (scan.ts)
   barcodes/             barcode format, check digit and scan-input clean-up (code.ts)
   labels/               ZPL label generator for the Zebra printer (zpl.ts)
+  links.ts              links page entries, the QR address and where /qr redirects
+  qr/                   merchandise QR code generator (merch-qr.ts)
+  brand/                the K mark's paths (k-mark.ts)
   auth/                 admin access check incl. two-step status (admin.ts), safe post-login paths
   catalog/              types, labels, Supabase catalogue reads, search/filters, URL query parsing,
                         product photo paths (photos.ts)
@@ -84,7 +88,8 @@ supabase/
   seeds/                development fixtures (never for production)
   setup/                owner-run SQL templates (placeholders only)
   tests/                SQL tests for constraints and permissions
-e2e/                    admin browser tests (Playwright; local Supabase only)
+e2e/                    browser and HTTP tests (Playwright)
+merch/qr/               the merchandise QR code (SVG, PDF, PNG): `npm run qr`
 ```
 
 ## Inventory model
@@ -850,6 +855,48 @@ set. Never point them, or `e2e/fixtures.sql`, at a hosted project.
   Re-run the test there to confirm.
 - **Not run yet:** the browser tests (no local Supabase/Docker available), and a real print
   and scan on the ZD888 and DS4308.
+
+## Links page and merchandise QR code
+
+**`/qr`** is the permanent address printed on merchandise as a QR code
+(`https://kharchnsave.pk/qr`). It answers with a **temporary 307 redirect**, marked
+`no-store`, to `QR_REDIRECT_TARGET` in `lib/links.ts` (today
+`/links?utm_source=merch&utm_medium=qr`). Browsers and caches never remember it, so
+the printed codes can be pointed somewhere else later by changing that one value and
+deploying. Never change it to a permanent (301/308) redirect.
+
+**`/links`** is a standalone, mobile-first page (no shop header, footer or demo notice):
+the K mark, name, tagline and a button per entry in `LINKS` (`lib/links.ts`):
+Instagram, Facebook, Shop Men / Women / Kids and the homepage. External links open in a
+new tab with `rel="noopener noreferrer"`. To add WhatsApp or anything else, add an entry
+to `LINKS`. It has its own title, description and social preview image
+(`app/links/opengraph-image.tsx`); `metadataBase` (root layout) is
+`https://kharchnsave.pk`, so shared links show the production address.
+
+Pages listed in `STANDALONE_PATHS` (`components/layout/site-chrome.tsx`) are shown without
+the shop's chrome. The header and footer are still included in those pages' React data
+(about 30 KB on `/links`, invisible); moving the shop's pages into a route group with
+their own layout would remove that if it ever matters.
+
+**The QR code** (`npm run qr`, files and printing advice in `merch/qr/README.md`) always
+encodes `QR_CODE_URL` (`https://kharchnsave.pk/qr`), never the address the site is
+running on. Version 6 (41 × 41), error correction H, 4-module border, forest green on
+white, the K mark on a white tile of exactly 15 × 15 modules with whole modules cleared
+under it. Of the 8 mask patterns, it uses the one that leaves the most error correction
+spare after the tile: at most 10 of the 14 errors each block can fix are used,
+counting modules under the mark's edges and the lime tag as misread.
+
+**Tests:**
+
+- `npm test` decodes the committed PNG and SVG with two real decoders (jsQR and ZXing):
+  clean, with two white scratches across them, and blurred (0.3 modules). It also
+  checks the tile and the PDF (one 50 mm page, vector only), that the files are up to
+  date, and that the per-block error count predicts both decoders: each block still
+  decodes with 14 errors in the worst case, and fails with 15 certain ones. Also
+  covered: `/qr`'s 307 and headers, and that `/links` renders every configured link.
+- `e2e/links.spec.ts` checks the same against a running build over HTTP (no browser
+  needed): `npm run build`, `npm start`, then
+  `E2E_BASE_URL=http://localhost:3000 npx playwright test e2e/links.spec.ts`.
 
 ## Enabling real checkout
 
