@@ -56,7 +56,14 @@ type ProductRow = {
   publication_status: string;
   listed_at: string | null;
   updated_at: string;
-  product_variants: { sku: string; size_eu: number | string; stock: number }[];
+  product_variants: {
+    sku: string;
+    size_eu: number | string;
+    stock: number;
+    // One-to-one (variant_id is unique), so PostgREST returns an object;
+    // an array is tolerated too.
+    variant_barcodes: { barcode: string } | { barcode: string }[] | null;
+  }[];
   product_images: {
     id: string;
     src: string | null;
@@ -72,9 +79,14 @@ type ProductRow = {
 const EDIT_COLUMNS = `
   id, version, item_code, slug, name, brand, department, styles, item_status, condition,
   condition_notes, colour, description, price_paisa, publication_status, listed_at, updated_at,
-  product_variants (sku, size_eu, stock),
+  product_variants (sku, size_eu, stock, variant_barcodes (barcode)),
   product_images (id, src, storage_path, alt, width, height, sort_order, shows_defect)
 `;
+
+function barcodeOf(embedded: ProductRow["product_variants"][number]["variant_barcodes"]) {
+  const row = Array.isArray(embedded) ? embedded[0] : embedded;
+  return row?.barcode;
+}
 
 export class AdminDataError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -104,7 +116,7 @@ function toEditable(row: ProductRow): EditableProduct {
       itemCode: row.item_code,
       slug: row.slug,
       sizes: row.product_variants
-        .map((v) => ({ size: String(Number(v.size_eu)), stock: String(v.stock), sku: v.sku }))
+        .map((v) => ({ size: String(Number(v.size_eu)), stock: String(v.stock), sku: v.sku, barcode: barcodeOf(v.variant_barcodes) }))
         .sort((a, b) => Number(a.size) - Number(b.size)),
     },
     photos: [...row.product_images]
@@ -242,6 +254,10 @@ const CONSTRAINT_MESSAGES: Record<string, { field?: keyof FieldErrors; message: 
   products_published_needs_size: { field: "sizes", message: "A published product needs at least one size." },
   products_published_needs_photo: { field: "photos", message: "A published product needs at least one photo." },
   products_condition_matches_item_status: { field: "condition", message: "New shoes are always condition “New”." },
+  products_item_code_not_barcode: {
+    field: "itemCode",
+    message: "An item code can’t look like a barcode (U followed by 8 digits). Use a different code.",
+  },
 };
 
 const HINT_MESSAGES: Record<string, { field?: keyof FieldErrors; message: string }> = {
@@ -253,6 +269,7 @@ const HINT_MESSAGES: Record<string, { field?: keyof FieldErrors; message: string
   sku_locked: { field: "sizes", message: "Sizes can’t change once the product has been published." },
   too_many_photos: { field: "photos", message: "A product can have at most 12 photos." },
   bad_transition: { message: "That status change isn’t allowed. Reload the page and try again." },
+  barcode_locked: { message: "Barcodes can’t be changed or removed. Reload the page and try again." },
 };
 
 export const CONFLICT_MESSAGE =

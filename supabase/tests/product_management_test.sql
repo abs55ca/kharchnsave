@@ -170,8 +170,11 @@ select pm_tests.returns('admin memberships are still owner-only',
 set local role anon;
 select pm_tests.throws('anon: cannot call admin_create_product',
   $q$ select public.admin_create_product(pm_tests.fields('TEST-PM-X', 'test-pm-x'), '[{"size": 42, "stock": 1}]') $q$, '42501');
-select pm_tests.returns('anon: cannot see drafts',
-  $q$ select count(*)::text from public.products where slug like 'test-pm-%' $q$, '0');
+select pm_tests.returns('anon: cannot see the owner''s draft',
+  $q$ select count(*)::text from public.products where slug = 'test-pm-owner-draft' $q$, '0');
+-- Every product in the database, not only the test's (real products may exist).
+select pm_tests.returns('anon: cannot see any draft or archived product',
+  $q$ select count(*)::text from public.products where publication_status <> 'published' $q$, '0');
 reset role;
 
 -- ---------------------------------------------------------------------------
@@ -416,9 +419,12 @@ reset role;
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub": "a0a0a0a0-0000-4000-8000-00000000000a", "role": "authenticated", "aal": "aal1"}', true);
 select pm_tests.returns('admin A (aal1): sees none of the test drafts, sizes or photos',
-  $q$ select (select count(*) from public.products where slug like 'test-pm-%')
-          || '/' || (select count(*) from public.product_variants where sku like 'TEST-PM-%')
-          || '/' || (select count(*) from public.product_images where storage_path is not null and storage_path like '%' || current_setting('pm.img1') || '%') $q$, '0/0/0');
+  $q$ select (select count(*) from public.products where id in (pm_tests.p('pl'), pm_tests.p('kids')) or slug = 'test-pm-owner-draft')
+          || '/' || (select count(*) from public.product_variants where product_id in (pm_tests.p('pl'), pm_tests.p('kids')))
+          || '/' || (select count(*) from public.product_images where product_id in (pm_tests.p('pl'), pm_tests.p('kids'))) $q$, '0/0/0');
+-- Every product in the database, not only the test's (real products may exist).
+select pm_tests.returns('admin A (aal1): sees no draft or archived product at all',
+  $q$ select count(*)::text from public.products where publication_status <> 'published' $q$, '0');
 select pm_tests.throws('admin A (aal1): can''t publish',
   $q$ select public.admin_set_publication_status(pm_tests.p('pl'), 1, 'published') $q$, '42501');
 reset role;

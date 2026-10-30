@@ -1,3 +1,4 @@
+import { BARCODE_PATTERN } from "@/lib/barcodes/code";
 import { CONDITIONS, DEPARTMENT_ORDER, STYLE_LABELS } from "@/lib/catalog/labels";
 import { slugify } from "@/lib/catalog/product-utils";
 import type { Condition, Department, ItemStatus, Style } from "@/lib/catalog/types";
@@ -36,7 +37,8 @@ export const PHOTO_UPLOAD = {
 export const STYLES = Object.keys(STYLE_LABELS) as Style[];
 export const PRELOVED_CONDITIONS = CONDITIONS.filter((c) => c.value !== "new").map((c) => c.value);
 
-export type SizeValue = { size: string; stock: string; sku?: string };
+/** sku and barcode are set for sizes that have been saved (display only; never sent back). */
+export type SizeValue = { size: string; stock: string; sku?: string; barcode?: string };
 
 /** What the form edits. Text stays text until the server parses it. */
 export type ProductFormValues = {
@@ -196,6 +198,8 @@ export function validateProduct(values: ProductFormValues):
   if (!values.itemCode) errors.itemCode = "Enter an item code, e.g. PL-M-1001.";
   else if (!ITEM_CODE.test(values.itemCode) || tooLong(values.itemCode, LIMITS.itemCode)) {
     errors.itemCode = "Use capital letters and numbers separated by single hyphens, e.g. PL-M-1001.";
+  } else if (BARCODE_PATTERN.test(values.itemCode)) {
+    errors.itemCode = "An item code can’t look like a barcode (U followed by 8 digits). Use a different code.";
   }
 
   const slug = values.slug || suggestSlug(values);

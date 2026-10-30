@@ -47,6 +47,7 @@ npm start          # serve the production build
 | `/admin/login`, `/admin/mfa`, `/admin` | Staff sign-in, two-step verification (authenticator app) and the admin dashboard (see [Admin area](#admin-area)) |
 | `/admin/products`, `/admin/products/new`, `/admin/products/[id]` | Product list (search, status filters, pages), create and edit screens, photos, publishing (see [Product management](#product-management)) |
 | `/product-photos/[productId]/[file]` | Shoppers' view of uploaded product photos (published products only) |
+| `/admin/scan`, `/admin/products/[id]/labels` | In-store barcode lookup and label printing (see [Barcodes and labels](#barcodes-and-labels)) |
 
 ### Code layout
 
@@ -59,10 +60,14 @@ components/
   product/              product card, gallery, purchase panel, badges
   cart/                 cart provider, drawer, lines, cart page, checkout hand-off
   ui/drawer.tsx         accessible side drawer (native <dialog>)
-  admin/                login and two-step forms, admin navigation, product editor, sign-out
+  admin/                login and two-step forms, admin navigation, product editor, sign-out,
+                        scan box and results, label options
 lib/
   admin/                product form rules (product-input.ts), admin catalogue reads and error
-                        messages (products.ts), photo checks and re-encoding (photos.ts)
+                        messages (products.ts), photo checks and re-encoding (photos.ts),
+                        barcode lookups (scan.ts)
+  barcodes/             barcode format, check digit and scan-input clean-up (code.ts)
+  labels/               ZPL label generator for the Zebra printer (zpl.ts)
   auth/                 admin access check incl. two-step status (admin.ts), safe post-login paths
   catalog/              types, labels, Supabase catalogue reads, search/filters, URL query parsing,
                         product photo paths (photos.ts)
@@ -79,6 +84,7 @@ supabase/
   seeds/                development fixtures (never for production)
   setup/                owner-run SQL templates (placeholders only)
   tests/                SQL tests for constraints and permissions
+e2e/                    admin browser tests (Playwright; local Supabase only)
 ```
 
 ## Inventory model
@@ -174,6 +180,8 @@ Notes:
 | `supabase/migrations/20261029120000_admin_product_management.sql` | Admin write access (verified admins only), publishing rules, stable IDs, version numbers, the admin functions and the photo storage rules (see [Product management](#product-management)) |
 | `supabase/tests/catalogue_test.sql` | Tests for the data rules and for what the public can read and write. Rolls back; leaves nothing behind |
 | `supabase/tests/product_management_test.sql` | Tests for admin access by role and two-step status, publishing rules, stable IDs and conflicting saves. Rolls back |
+| `supabase/migrations/20261029200000_variant_barcodes.sql` | In-store barcodes: one permanent barcode per size, the admin-only register and the read-only scan lookup (see [Barcodes and labels](#barcodes-and-labels)) |
+| `supabase/tests/barcodes_test.sql` | Tests for barcode format, assignment, uniqueness, immutability, access and the lookup. Rolls back |
 | `scripts/verify-catalogue.mjs` | `npm run db:verify`: checks the fixtures through the API using the publishable key |
 
 What the schema enforces:
@@ -655,6 +663,193 @@ Supabase Storage, not a mock), with a production build of the site:
 **Still to check by hand on `kharchnsave-dev`,** after following the steps above: the
 migration and tests in the SQL Editor, the bucket settings, a real upload from your phone,
 publishing and unpublishing, and the photo appearing in the shop.
+
+> **Note:** the API (88), browser (85) and storefront (53) checks above were one-off
+> scripts run from a temporary folder during development, against a local Supabase stack
+> that was started for that session. They were not kept and are **not in this
+> repository**; only the SQL tests in `supabase/tests/` are. Repeatable browser tests now
+> live in `e2e/` (see [Barcodes and labels](#barcodes-and-labels)).
+
+## Barcodes and labels
+
+Every sellable unit has its own permanent barcode, printed on a 2 × 1 inch label and
+scanned at the counter with the USB scanner (Zebra DS4308, keyboard mode). A **sellable
+unit** is a product's size row: a pre-loved pair (one of a kind), or one EU size of a new
+kids' style (identical pairs share the barcode and have a stock count).
+
+A barcode only **identifies** a size. Price, stock and every other detail always come
+from the database, so changing a price never means reprinting labels. Item codes and SKUs
+are unchanged; the barcode is a separate value.
+
+### Barcodes
+
+- **Format:** `U` + a 7-digit serial number + a check digit, e.g. `U00000013`. The only
+  letter is `U`, which can't be mistaken for a digit. The check digit (Damm algorithm)
+  catches every single-digit typo and every swap of two neighbouring digits when a code is
+  typed by hand. About 10 million barcodes are possible.
+- **Assigned when a size is created,** drafts included, so a pair can be labelled before it
+  is photographed or published. The database issues them; nobody can choose one.
+- **Never changed, moved, deleted or reused,** not even by the database owner (a trigger
+  refuses it). Unpublishing, archiving, restoring, stock changes and a draft's item-code
+  change all keep the barcode.
+- **Removed sizes:** a draft's size can still be removed (or its EU size changed, which
+  replaces it). Its barcode is then **retired**: kept in the register, never reused, and
+  scanning it says the label is no longer in use. The product editor warns before you save
+  such a change. Published sizes can't be removed, so their barcodes never retire.
+- **Admin-only:** barcodes live in their own table, `variant_barcodes`, readable only by
+  verified admins (membership + two-step verification). The storefront and the public key
+  can't see them.
+- **Item codes can't look like barcodes** (`U` followed by 8 digits), so a scan is never
+  ambiguous.
+
+### Scanning: `/admin/scan`
+
+The scan box is focused when the page opens. The scanner types the code and presses Enter;
+the box empties and is focused again immediately, ready for the next pair. A result shows
+the photo, name, item code, SKU, EU size, price, stock, status and barcode, with links to
+the product and to its label.
+
+Messages say plainly when a pair is **archived** (not for sale), a **draft** (not in the
+shop yet), **sold** (pre-loved, stock 0) or **out of stock** (new, stock 0 in that size),
+when a label is **no longer in use** (retired), when a typed code has a **typo**, and when
+**nothing is found** (with a hint if it looks like a manufacturer's box barcode). Typing an
+**item code** lists every size with its barcode; an exact **SKU** also works. Letters may be
+typed in lower case and spaces are ignored.
+
+**Scanning never changes anything.** Lookups are GET requests answered by
+`admin_scan_lookup`, a `STABLE` database function: Postgres refuses any insert, update or
+delete inside one.
+
+### Printing labels
+
+**Print label** (on each saved size in the product editor, and on a scan result) opens
+`/admin/products/[id]/labels`. Each label has a short name, the EU size, a Code 128
+barcode and its readable ID underneath. **No shop branding and no price.**
+
+- **Short name:** brand and name (without "Unbranded"), cut at a whole word to at most 18
+  characters, e.g. "New Balance Fresh Foam X 1080" → "New Balance Fresh". You can type a
+  different short name for one print; the product isn't changed.
+- **Quantity:** 1 for a pre-loved pair; for new shoes, the stock of that size. 1 to 100 per
+  size. "Labels for all sizes" puts every size of a new style in one file.
+- **Printing (works today):** **Download .zpl** or **Copy ZPL**, then in **Zebra Setup
+  Utilities** select the printer and either send the downloaded file to it, or open the
+  window for communicating with the printer, paste the ZPL and send it. The browser never
+  prints to the USB printer directly.
+
+**Layout** (203 dpi, 406 × 203 dots, `^LT20` label top, `^PR4` print speed, both included
+in every label; UTF-8 text with `^CI28`). Printed and checked on the shop's ZD888: an
+18-character name ("New Balance 574 Wh") and `EU 42.5` each print cleanly on one line.
+
+| Element | Position | Notes |
+| --- | --- | --- |
+| Short name | `^FO28,14`, font `^A0N,26,26`, field `^FB228,1,0,L` (x 28–256) | The field ends 10 dots before the size's field starts, so even an over-wide name wraps inside its own box and never reaches the size |
+| EU size | `^FO266,14`, font `^A0N,26,26`, field `^FB112,1,0,R` (x 266–378) | e.g. `EU 42.5` |
+| Barcode | `^BY2`, `^FO102,46^BCN,88,N,N,N,N` (y 46–134) | Centred: 202 dots wide |
+| Readable ID | `^FO0,145`, font `^A0N,30,30`, `^FB406,1,0,C` | e.g. `U00000013` |
+
+Both text boxes keep at least 28 dots (3.5 mm) from the label's left and right edges.
+
+**Barcode width:** a Code 128 symbol is 11 modules (start) + 11 per symbol + 11 (check) +
+13 (stop). `U00000013` is encoded as Code B for `U`, a switch to Code C, then 4 digit
+pairs: 6 symbols, **101 modules = 202 dots** (25.3 mm) at `^BY2`. Code 128 needs 10
+modules (20 dots) of white on each side; centred, there are 102 dots each side. Even if
+every character were encoded in Code B (9 symbols, 268 dots), it would still fit. The
+generator allows at most **12 characters**: with 20 dots of quiet zone plus 8 dots (1 mm)
+of position tolerance per side, a symbol may be at most 350 dots = 175 modules, and
+35 + 11 × 12 = 167 ≤ 175 (13 characters would need 178).
+
+**Text block (`^TB`):** Zebra documents `^TB` for firmware V60.14.x / V50.14.x and later,
+but not whether the ZD888's V102.01.07Z firmware supports it, so labels rely on the
+18-character limit and the fixed-width `^FB` field instead.
+
+**Calibration print** (do this once before printing real labels): on any label page,
+**Download the calibration labels** (`/admin/labels/calibration`) and send the file to
+the printer. It prints three labels:
+
+1. the worst case, 18 × "W" next to `EU 42.5`: "W" is so wide that the name overprints
+   itself inside its box; check it never reaches the size and the size stays readable;
+2. the checked reference, "New Balance 574 Wh" (18 characters) with `EU 42.5`: both should
+   print cleanly on one line, as on the label already checked;
+3. the same as 1 but with `^TB`: if the name is cut off neatly inside its box, the firmware
+   supports `^TB`; if it runs across the label, it doesn't (the normal labels don't use it).
+
+Then scan each label's barcode into `/admin/scan`: the calibration barcodes (`U99999992`,
+`U00000013`, `U12345671`) should give "Nothing found" or an existing size, never "Check that
+code". If anything is cut off or crowded, note which label and what, so the positions in
+`lib/labels/zpl.ts` can be adjusted.
+
+**Later printing options** (not built):
+
+| Option | What it gives | Needs |
+| --- | --- | --- |
+| Shared Windows printer + `.zpl` file association (`copy /b file.zpl \\PC\ZD888`) | Double-click a downloaded file to print | Windows printer sharing; a driver that passes raw data through |
+| Zebra Browser Print | A Print button in the admin | Zebra's free local service on the shop PC, this site approved in it, Zebra's script bundled with the site; ZD888 support to confirm |
+| QZ Tray | Silent printing from the browser | A local agent; silent printing needs a paid signing certificate |
+| Network printing (port 9100) | Printing without USB | A networked printer and a local helper; the hosted site can't reach the shop's network, and the printer must never be exposed to the internet |
+| WebUSB | Direct USB from Chrome or Edge | Replacing the Windows driver with WinUSB, which breaks Zebra Setup Utilities. Not recommended |
+
+### Selling later (design notes, nothing built)
+
+A confirmed sale should be one database function that, in a single transaction, locks the
+sizes involved, checks there is enough stock, lowers it, records the sale and its lines
+(size, barcode and price at the time), and bumps the product's `version` so an open editor
+can't overwrite the lower stock. A request ID makes a double-submitted scan harmless; the
+`stock >= 0` and pre-loved `stock <= 1` rules are the last line of defence.
+
+**Open question:** which products can be sold in the shop. Don't assume only published
+ones: a pair may be on the shelf before its listing is published, so whether drafts (and
+never archived products?) can be sold at the counter is still to be decided.
+
+### Setting it up on `kharchnsave-dev` (in this order)
+
+Apply the migration **before** running this version of the site against
+`kharchnsave-dev`: the product editor reads barcodes, so editing products fails until the
+migration is in place.
+
+1. Supabase dashboard → `kharchnsave-dev` → **SQL Editor** → **New query**. Paste all of
+   `supabase/migrations/20261029200000_variant_barcodes.sql` and click **Run**. Expect
+   "Success. No rows returned" (or a result row from the counter's `setval`). It gives every
+   existing size a barcode and changes no existing rows.
+2. **New query**: paste all of `supabase/tests/barcodes_test.sql` and **Run**. It ends with
+   `ROLLBACK` (nothing is kept). Success means every test passed; the first failure stops it
+   with `FAIL <test>: <reason>`. Notices list each `PASS`.
+3. Optionally re-run the other three test files the same way; they should still pass.
+4. `npm run db:verify`: also checks that the public key can't read barcodes.
+
+Running the SQL tests leaves small gaps in the serial numbers (the tests create sizes in a
+transaction that is rolled back, and Postgres never gives sequence numbers back). Those
+numbers were never issued to anything, so this is harmless.
+
+### Tests
+
+| Command | What | Needs |
+| --- | --- | --- |
+| `npm test` | Unit tests (Vitest): check digit, scan input, ZPL layout, barcode width, name shortening, quantities, ZPL injection | Nothing |
+| SQL Editor or `supabase test db` | `supabase/tests/*.sql` | A Supabase database (local Docker stack, or the SQL Editor) |
+| `npm run test:e2e` | Browser tests (Playwright) for the scan page and label download | Docker + the Supabase CLI's local stack with all migrations, `supabase/seeds/dev_catalogue_fixtures.sql` and `e2e/fixtures.sql`; a production build running against it (`E2E_BASE_URL`); a test admin with an authenticator app (`E2E_ADMIN_EMAIL`, `E2E_ADMIN_PASSWORD`, `E2E_ADMIN_TOTP_SECRET`); `npx playwright install chromium` once |
+
+The browser tests only read data and sign in, and are skipped when the variables aren't
+set. Never point them, or `e2e/fixtures.sql`, at a hosted project.
+
+### Barcodes verification status
+
+- **Unit tests:** 37/37 pass. Lint, type-check and production build pass.
+- **SQL:** all four migrations and all four SQL test files (265 checks, including the 57
+  barcode checks) ran without errors in PGlite, a WebAssembly build of Postgres, with small
+  stand-ins for Supabase's `auth` functions, API roles, default grants, `storage.objects`
+  and an `rls_auto_enable()`-style event-trigger function, and also with real
+  admin-created products present (an archived `TEST-0001` and a published listing whose
+  slug starts with `test-`). The SQL tests count only the rows they create; their
+  visibility checks cover every product in the database. They ran on a fresh database and on top of the dev fixtures (the
+  backfill). **That is not Supabase:** PostgREST (the API's embedding of barcodes and the
+  lookup functions), real Supabase Auth and the hosted project's grants are untested.
+- **On `kharchnsave-dev`:** the migration applied (the backfill set the counter to 8).
+  The first run of `barcodes_test.sql` failed only on its search_path check, which also
+  flagged Supabase's own `rls_auto_enable()`. The check now applies the strict rule to
+  every SECURITY DEFINER function except event triggers (which our migrations never create).
+  Re-run the test there to confirm.
+- **Not run yet:** the browser tests (no local Supabase/Docker available), and a real print
+  and scan on the ZD888 and DS4308.
 
 ## Enabling real checkout
 

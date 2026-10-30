@@ -109,8 +109,18 @@ grant execute on all functions in schema catalogue_tests to anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Test data (slugs start with test-, codes and SKUs with TEST-)
+--
+-- The database may also hold real products, including an admin's own
+-- "test-..." listings, so checks never select test rows by those prefixes.
+-- They use the IDs recorded in catalogue_tests.fixtures (products this script
+-- created), or exact slugs and SKUs. Visibility checks additionally cover
+-- every product in the database.
 -- ---------------------------------------------------------------------------
 
+create table catalogue_tests.fixtures (id uuid primary key);
+grant select on catalogue_tests.fixtures to anon, authenticated;
+
+with created as (
 insert into public.products
   (item_code, slug, name, brand, department, styles, item_status, condition, colour, price_paisa, publication_status, listed_at, description)
 values
@@ -122,7 +132,10 @@ values
   ('TEST-PL-EMPTY', 'test-preloved-empty', 'Test pair, no size yet', 'Testbrand', 'men', '{}', 'preloved', 'good', 'Grey', 100000, 'draft', null, 'Test description'),
   ('TEST-NEW-TWO', 'test-new-two-sizes', 'Test two sizes', 'Testbrand', 'kids', '{}', 'new', 'new', 'Blue', 100000, 'draft', null, 'Test description'),
   ('TEST-NEW-THREE', 'test-new-stock-three', 'Test three in stock', 'Testbrand', 'kids', '{}', 'new', 'new', 'Pink', 100000, 'draft', null, 'Test description'),
-  ('TEST-NEW-ONE', 'test-new-single', 'Test single pair', 'Testbrand', 'kids', '{}', 'new', 'new', 'Green', 100000, 'draft', null, 'Test description');
+  ('TEST-NEW-ONE', 'test-new-single', 'Test single pair', 'Testbrand', 'kids', '{}', 'new', 'new', 'Green', 100000, 'draft', null, 'Test description')
+returning id
+)
+insert into catalogue_tests.fixtures select id from created;
 
 insert into public.product_variants (product_id, item_status, sku, size_eu, stock)
 select p.id, p.item_status, v.sku, v.size_eu, v.stock
@@ -156,11 +169,11 @@ join public.products p on p.slug = i.slug;
 -- The owner sees every test row, including the hidden ones; later "hidden"
 -- checks are meaningful because these rows are known to exist.
 select catalogue_tests.returns('setup: 8 test products exist',
-  $q$ select count(*)::text from public.products where slug like 'test-%' $q$, '8');
+  $q$ select count(*)::text from public.products where id in (select id from catalogue_tests.fixtures) $q$, '8');
 select catalogue_tests.returns('setup: 10 test variants exist',
-  $q$ select count(*)::text from public.product_variants where sku like 'TEST-%' $q$, '10');
+  $q$ select count(*)::text from public.product_variants where product_id in (select id from catalogue_tests.fixtures) $q$, '10');
 select catalogue_tests.returns('setup: 5 test images exist',
-  $q$ select count(*)::text from public.product_images where src like '/images/test/%' $q$, '5');
+  $q$ select count(*)::text from public.product_images where product_id in (select id from catalogue_tests.fixtures) $q$, '5');
 
 -- ---------------------------------------------------------------------------
 -- Product constraints
@@ -419,6 +432,15 @@ select catalogue_tests.returns('API roles cannot execute the updated_at trigger 
 -- What the public sees and can do (run once as anon, once as authenticated)
 -- ---------------------------------------------------------------------------
 
+-- Every product that must be hidden: this script's drafts and archived
+-- products AND any others in the database. Taken as the owner, who sees all.
+create table catalogue_tests.unpublished as
+  select id from public.products where publication_status <> 'published';
+grant select on catalogue_tests.unpublished to anon, authenticated;
+
+select catalogue_tests.returns('setup: the hidden set includes the test''s 5 remaining drafts and archived products',
+  $q$ select count(*)::text from catalogue_tests.unpublished where id in (select id from catalogue_tests.fixtures) $q$, '5');
+
 create function catalogue_tests.public_access(expected_role text)
 returns void language plpgsql as $$
 declare
@@ -428,14 +450,15 @@ begin
 
   -- Positive checks first: published rows must be visible.
   perform catalogue_tests.returns(r || ': sees exactly the published test products',
-    $q$ select string_agg(slug, ',' order by slug) from public.products where slug like 'test-%' $q$,
+    $q$ select string_agg(slug, ',' order by slug) from public.products where id in (select id from catalogue_tests.fixtures) $q$,
     'test-published-new,test-published-preloved');
   perform catalogue_tests.returns(r || ': sees exactly the sizes of published products',
-    $q$ select string_agg(sku, ',' order by sku) from public.product_variants where sku like 'TEST-%' $q$,
+    $q$ select string_agg(sku, ',' order by sku) from public.product_variants
+        where product_id in (select id from catalogue_tests.fixtures) $q$,
     'TEST-PUB-NEW-20,TEST-PUB-NEW-21,TEST-PUB-NEW-21.5,TEST-PUB-PL-42');
   perform catalogue_tests.returns(r || ': sees exactly the images of published products, defect photo included',
     $q$ select string_agg(src || case when shows_defect then ' (defect)' else '' end, ',' order by src)
-        from public.product_images where src like '/images/test/%' $q$,
+        from public.product_images where product_id in (select id from catalogue_tests.fixtures) $q$,
     '/images/test/published-new.jpg,/images/test/published-preloved-defect.jpg (defect),/images/test/published-preloved.jpg');
 
   -- Hidden rows, known to exist from the setup checks.
@@ -447,7 +470,15 @@ begin
     $q$ select count(*)::text from public.product_images
         where src in ('/images/test/draft.jpg', '/images/test/archived.jpg') $q$, '0');
   perform catalogue_tests.returns(r || ': helper drafts are hidden too',
-    $q$ select count(*)::text from public.products where slug like 'test-%' and publication_status <> 'published' $q$, '0');
+    $q$ select count(*)::text from public.products
+        where id in (select id from catalogue_tests.fixtures) and publication_status <> 'published' $q$, '0');
+  -- Every product in the database, not only the test's.
+  perform catalogue_tests.returns(r || ': no draft or archived product is visible at all',
+    $q$ select count(*)::text from public.products where publication_status <> 'published' $q$, '0');
+  perform catalogue_tests.returns(r || ': no size of any draft or archived product is visible',
+    $q$ select count(*)::text from public.product_variants where product_id in (select id from catalogue_tests.unpublished) $q$, '0');
+  perform catalogue_tests.returns(r || ': no image of any draft or archived product is visible',
+    $q$ select count(*)::text from public.product_images where product_id in (select id from catalogue_tests.unpublished) $q$, '0');
 
   -- Writes are refused (by privileges for anon; by privileges or row-level
   -- security for signed-in users who aren't verified admins) or change nothing.
@@ -540,7 +571,7 @@ reset role;
 select catalogue_tests.returns('nothing was changed by the blocked writes',
   $q$ select (select price_paisa from public.products where slug = 'test-published-preloved')
           || ' / ' || (select stock from public.product_variants where sku = 'TEST-PUB-NEW-20')
-          || ' / ' || (select count(*) from public.product_images where src like '/images/test/%') $q$,
+          || ' / ' || (select count(*) from public.product_images where product_id in (select id from catalogue_tests.fixtures)) $q$,
   '500000 / 5 / 5');
 
 select catalogue_tests.check('ALL CATALOGUE TESTS PASSED', true);

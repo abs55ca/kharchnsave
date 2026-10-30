@@ -5,6 +5,7 @@ const LINKS = [
   { key: "home", href: "/admin", label: "Dashboard" },
   { key: "products", href: "/admin/products", label: "Products" },
   { key: "new", href: "/admin/products/new", label: "Add product" },
+  { key: "scan", href: "/admin/scan", label: "Scan" },
 ] as const;
 
 /** Navigation for verified admins, shown above every admin page. */

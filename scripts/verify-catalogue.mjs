@@ -326,6 +326,30 @@ async function checkWritesRefused(supabase) {
 }
 
 // ---------------------------------------------------------------------------
+// 5. Barcodes are admin-only
+// (supabase/migrations/20261029200000_variant_barcodes.sql)
+// ---------------------------------------------------------------------------
+
+async function checkBarcodesHidden(supabase) {
+  const attempts = [
+    ["read barcodes", () => supabase.from("variant_barcodes").select("barcode").limit(1)],
+    ["look up a barcode", () => supabase.rpc("admin_scan_lookup", { p_code: "U00000013" })],
+  ];
+  for (const [action, run] of attempts) {
+    const { error } = await run();
+    if (error?.code === "PGRST205" || error?.code === "PGRST202") {
+      console.log(`  - skipped "${action}": the barcode migration isn't applied yet`);
+    } else if (error?.code === "42501") {
+      pass(`public key cannot ${action} (permission denied)`);
+    } else if (!error) {
+      fail(`public key cannot ${action}`, "The request was accepted. Barcodes must be readable by verified admins only; check the grants.");
+    } else {
+      fail(`public key cannot ${action}`, `Expected "permission denied" but got ${describeError(error)}.`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 console.log("Kharch n Save catalogue check (public view, publishable key)\n");
 const { url, key } = loadConfig();
@@ -337,4 +361,6 @@ console.log("");
 if (await checkProducts(supabase)) await checkChildren(supabase);
 console.log("");
 await checkWritesRefused(supabase);
+console.log("");
+await checkBarcodesHidden(supabase);
 finish();

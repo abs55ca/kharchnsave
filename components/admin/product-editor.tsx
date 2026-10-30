@@ -453,6 +453,8 @@ export function ProductEditor({ product, created = false }: { product?: Editable
 
           <SizesEditor
             id={fieldId("sizes")}
+            productId={product?.id}
+            savedSizes={saved.values.sizes}
             itemStatus={values.itemStatus}
             itemCode={values.itemCode}
             sizes={values.sizes}
@@ -532,6 +534,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function SizesEditor({
   id,
+  productId,
+  savedSizes,
   itemStatus,
   itemCode,
   sizes,
@@ -540,6 +544,9 @@ function SizesEditor({
   onChange,
 }: {
   id: string;
+  productId?: string;
+  /** The sizes as saved, with their barcodes. */
+  savedSizes: SizeValue[];
   itemStatus: ProductFormValues["itemStatus"];
   itemCode: string;
   sizes: SizeValue[];
@@ -551,6 +558,15 @@ function SizesEditor({
     onChange(sizes.map((row, i) => (i === index ? { ...row, ...change } : row)));
   const preloved = itemStatus === "preloved";
   const rows = preloved ? sizes.slice(0, 1) : sizes;
+  // The database matches sizes by EU size: a saved size that is no longer
+  // listed (removed, or its size changed) is deleted on save, which retires
+  // its barcode for good.
+  const listed = (size: string) => sizes.some((row) => row.size !== "" && Number(row.size) === Number(size));
+  const retiring = savedSizes.filter((saved) => saved.barcode && !listed(saved.size));
+  const savedBarcode = (row: SizeValue) =>
+    row.barcode && savedSizes.some((saved) => saved.barcode === row.barcode && Number(saved.size) === Number(row.size))
+      ? row.barcode
+      : undefined;
 
   return (
     <fieldset id={id} className="mt-6" aria-describedby={`${id}-hint${error ? ` ${id}-error` : ""}`}>
@@ -606,10 +622,19 @@ function SizesEditor({
                   />
                 )}
               </div>
-              <p className="pb-2.5 font-mono text-xs text-muted" title="SKU">
+              <p className="pb-2.5 font-mono text-xs text-muted">
                 {sku ? `SKU ${sku}` : null}
                 {!row.sku && sku ? " (new)" : null}
+                {savedBarcode(row) ? ` · Barcode ${savedBarcode(row)}` : null}
               </p>
+              {productId && savedBarcode(row) ? (
+                <Link
+                  href={`/admin/products/${productId}/labels?size=${Number(row.size)}`}
+                  className="mb-2 text-sm font-semibold text-forest underline"
+                >
+                  Print label<span className="sr-only"> for EU {Number(row.size)}</span>
+                </Link>
+              ) : null}
               {!preloved ? (
                 <button
                   type="button"
@@ -634,6 +659,22 @@ function SizesEditor({
         >
           Add a size
         </button>
+      ) : null}
+      {retiring.length > 0 ? (
+        <p role="status" className="mt-3 rounded-md border-l-4 border-danger bg-white px-4 py-3 text-sm">
+          <strong className="text-danger">Printed labels will stop working.</strong> Saving removes{" "}
+          {retiring.map((saved) => `EU ${Number(saved.size)} (barcode ${saved.barcode})`).join(", ")} and retires{" "}
+          {retiring.length === 1 ? "its barcode" : "their barcodes"} for good. Barcodes are never reused, so labels
+          already printed for {retiring.length === 1 ? "it" : "them"} will scan as “no longer in use”. New sizes get new
+          barcodes: print their labels after saving.
+        </p>
+      ) : null}
+      {productId && !preloved && savedSizes.filter((saved) => saved.barcode).length > 1 ? (
+        <p className="mt-3 text-sm">
+          <Link href={`/admin/products/${productId}/labels`} className="font-semibold text-forest underline">
+            Print labels for all sizes
+          </Link>
+        </p>
       ) : null}
       {error ? (
         <p id={`${id}-error`} className={ERROR}>

@@ -71,6 +71,9 @@ async function AdminHome() {
           <Link href="/admin/products" className="btn btn-outline">
             All products
           </Link>
+          <Link href="/admin/scan" className="btn btn-outline">
+            Scan
+          </Link>
         </div>
       </section>
     </>
