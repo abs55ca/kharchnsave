@@ -2,15 +2,18 @@ import { AdminDataError } from "@/lib/admin/products";
 import { getScanProduct } from "@/lib/admin/scan";
 import { getAdminClient } from "@/lib/auth/admin";
 import { UUID_PATTERN } from "@/lib/catalog/photos";
-import { buildLabels, chooseLabelName, parseQuantity, shortLabelName, type LabelSpec } from "@/lib/labels/zpl";
+import { labelNameFor } from "@/lib/labels/name-fit";
+import { buildLabels, parseQuantity, type LabelSpec } from "@/lib/labels/zpl";
 
 /**
- * GET /admin/products/<product id>/labels/download?name=…&q_<size>=<quantity>
+ * GET /admin/products/<product id>/labels/download?q_<size>=<quantity>
  *
  * A .zpl file for the shop's label printer. Every request checks the
- * verified admin and reads the product, sizes and barcodes with their own
- * session; the request only chooses the short name and how many labels per
- * size (0 or absent skips a size). Reading only: nothing is changed. Private
+ * verified admin and reads the product, its label name, sizes and barcodes
+ * with their own session; the request only chooses how many labels per size
+ * (0 or absent skips a size). The name is the product's saved label name, or
+ * its full name: the same check as the label page (lib/labels/name-fit.ts),
+ * and a name that doesn't fit is refused, never cut short. Reading only: nothing is changed. Private
  * and never cached (proxy.ts also marks /admin responses no-store).
  */
 const PRIVATE = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" };
@@ -37,15 +40,17 @@ export async function GET(request: Request, { params }: RouteContext<"/admin/pro
   }
   if (!product) return text("Not found", 404);
 
+  const name = labelNameFor(product);
+  if (name.problem) return text(`${name.problem} Change it on the product page, then print again.`, 409);
+
   const search = new URL(request.url).searchParams;
-  const name = chooseLabelName(search.get("name"), shortLabelName(product.brand, product.name));
   const specs: LabelSpec[] = [];
   for (const unit of product.units) {
     const raw = search.get(`q_${unit.size}`);
     if (raw === null || !unit.barcode) continue;
     const quantity = parseQuantity(raw, { allowZero: true });
     if (quantity === null) return text("Label quantities are whole numbers from 0 to 100. Go back and correct them.", 400);
-    if (quantity > 0) specs.push({ name, size: unit.size, barcode: unit.barcode, quantity });
+    if (quantity > 0) specs.push({ name: name.text, size: unit.size, barcode: unit.barcode, quantity });
   }
   if (specs.length === 0) return text("Choose at least one label. Go back and enter a quantity.", 400);
 

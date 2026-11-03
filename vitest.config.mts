@@ -5,8 +5,15 @@ import { defineConfig } from "vitest/config";
 // rendered to HTML; browser tests are separate (playwright.config.ts).
 export default defineConfig({
   resolve: {
-    // tsconfig.json's "@/*" path.
-    alias: [{ find: /^@\//, replacement: fileURLToPath(new URL("./", import.meta.url)) }],
+    alias: [
+      // tsconfig.json's "@/*" path.
+      { find: /^@\//, replacement: fileURLToPath(new URL("./", import.meta.url)) },
+      // Next.js resolves this marker itself; outside it, use its empty stub.
+      {
+        find: /^server-only$/,
+        replacement: fileURLToPath(new URL("./node_modules/next/dist/compiled/server-only/empty.js", import.meta.url)),
+      },
+    ],
   },
   test: {
     environment: "node",

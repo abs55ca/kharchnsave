@@ -1,7 +1,10 @@
-import { BARCODE_PATTERN } from "@/lib/barcodes/code";
+import { looksLikeBarcode } from "@/lib/barcodes/code";
 import { CONDITIONS, DEPARTMENT_ORDER, STYLE_LABELS } from "@/lib/catalog/labels";
+import { ACTIVATION_MAX, LIGHT_UP_CONDITION_VALUES, type LightUpCondition } from "@/lib/catalog/light-up";
 import { slugify } from "@/lib/catalog/product-utils";
+import { formatPrice } from "@/lib/format";
 import type { Condition, Department, ItemStatus, Style } from "@/lib/catalog/types";
+import { LABEL_NAME_MAX_CHARS, labelNameFor, tidyLabelName } from "@/lib/labels/name-fit";
 
 /*
  * The admin product form: its values, and the server-side checks that turn
@@ -12,6 +15,8 @@ import type { Condition, Department, ItemStatus, Style } from "@/lib/catalog/typ
 
 export const LIMITS = {
   name: 120,
+  labelName: LABEL_NAME_MAX_CHARS,
+  lightUpActivation: ACTIVATION_MAX,
   brand: 60,
   colour: 60,
   description: 4000,
@@ -38,11 +43,27 @@ export const STYLES = Object.keys(STYLE_LABELS) as Style[];
 export const PRELOVED_CONDITIONS = CONDITIONS.filter((c) => c.value !== "new").map((c) => c.value);
 
 /** sku and barcode are set for sizes that have been saved (display only; never sent back). */
-export type SizeValue = { size: string; stock: string; sku?: string; barcode?: string };
+/**
+ * A size row in the form. stockWas and inventoryVersion are what the form
+ * loaded for a saved size: the database writes the stock only if it was
+ * changed, and only if nobody else changed it since (inventory version).
+ * reserved is shown, never edited: pairs held for orders.
+ */
+export type SizeValue = {
+  size: string;
+  stock: string;
+  sku?: string;
+  barcode?: string;
+  stockWas?: string;
+  inventoryVersion?: string;
+  reserved?: number;
+};
 
 /** What the form edits. Text stays text until the server parses it. */
 export type ProductFormValues = {
   name: string;
+  /** Short name for printed labels only; empty: the labels use the name. */
+  labelName: string;
   brand: string;
   colour: string;
   department: Department;
@@ -52,19 +73,33 @@ export type ProductFormValues = {
   /** One note per line. */
   conditionNotes: string;
   description: string;
-  /** Rupees, as typed, e.g. "8,500" or "8500.50". */
+  /** Light-up soles: "" not recorded (every product before this existed), "no", or "yes". */
+  lightUp: LightUpAnswer;
+  /** Used only when lightUp is "yes". */
+  lightUpCondition: LightUpCondition;
+  /** Used only when lightUp is "yes"; optional. */
+  lightUpActivation: string;
+  /** The regular price: rupees, as typed, e.g. "8,500" or "8500.50". */
   price: string;
+  /** Optional sale price, rupees as typed; empty: no sale. Customers pay it while it is set. */
+  salePrice: string;
+  /** New products only: the database assigns the item code (ITEM-000123) when the draft is created. */
+  autoItemCode: boolean;
   itemCode: string;
   slug: string;
   sizes: SizeValue[];
 };
+
+export type LightUpAnswer = "" | "yes" | "no";
 
 export type FieldName = keyof ProductFormValues | "photos";
 export type FieldErrors = Partial<Record<FieldName, string>>;
 
 /** Database columns for admin_create_product / admin_save_product. */
 export type ProductFields = {
-  item_code: string;
+  /** null with auto_item_code: assigned by the database. */
+  item_code: string | null;
+  auto_item_code: boolean;
   slug: string;
   name: string;
   brand: string;
@@ -76,12 +111,19 @@ export type ProductFields = {
   colour: string;
   description: string;
   price_paisa: number;
+  sale_price_paisa: number | null;
+  label_name: string | null;
+  /** null: not recorded. */
+  light_up: boolean | null;
+  light_up_condition: LightUpCondition | null;
+  light_up_activation: string | null;
 };
 
-export type SizeRow = { size: number; stock: number };
+export type SizeRow = { size: number; stock: number; stock_was?: number; inventory_version?: number };
 
 export const EMPTY_PRODUCT: ProductFormValues = {
   name: "",
+  labelName: "",
   brand: "",
   colour: "",
   department: "men",
@@ -90,7 +132,13 @@ export const EMPTY_PRODUCT: ProductFormValues = {
   condition: "excellent",
   conditionNotes: "",
   description: "",
+  // Not recorded until someone checks: nothing is assumed about new products either.
+  lightUp: "",
+  lightUpCondition: "not_checked",
+  lightUpActivation: "",
   price: "",
+  salePrice: "",
+  autoItemCode: true,
   itemCode: "",
   slug: "",
   sizes: [{ size: "", stock: "1" }],
@@ -107,6 +155,9 @@ export function rupeesToPaisa(input: string): number | null {
   if (!match) return null;
   return Number(match[1]) * 100 + Number((match[2] ?? "").padEnd(2, "0"));
 }
+
+/** Paisa → "Rs. 8,500" for messages. */
+const formatPaisa = (paisa: number) => formatPrice(paisa / 100);
 
 /** Paisa → rupees text for the form: 850000 → "8500", 850050 → "8500.50". */
 export function paisaToRupeesText(paisa: number): string {
@@ -134,6 +185,10 @@ function parseSizes(raw: string): SizeValue[] | null {
     return parsed.map((row) => ({
       size: typeof row?.size === "string" ? row.size.trim() : String(row?.size ?? ""),
       stock: typeof row?.stock === "string" ? row.stock.trim() : String(row?.stock ?? ""),
+      ...(typeof row?.stockWas === "string" && /^\d{1,4}$/.test(row.stockWas) ? { stockWas: row.stockWas } : {}),
+      ...(typeof row?.inventoryVersion === "string" && /^\d{1,15}$/.test(row.inventoryVersion)
+        ? { inventoryVersion: row.inventoryVersion }
+        : {}),
     }));
   } catch {
     return null;
@@ -143,8 +198,11 @@ function parseSizes(raw: string): SizeValue[] | null {
 /** Reads the form fields (not photos) back into form values, unvalidated. */
 export function readProductForm(formData: FormData): ProductFormValues {
   const itemStatus = text(formData, "itemStatus") === "new" ? "new" : "preloved";
+  const lightUp = text(formData, "lightUp");
+  const lightUpCondition = text(formData, "lightUpCondition");
   return {
     name: text(formData, "name"),
+    labelName: tidyLabelName(text(formData, "labelName")),
     brand: text(formData, "brand"),
     colour: text(formData, "colour"),
     department: text(formData, "department") as Department,
@@ -153,7 +211,16 @@ export function readProductForm(formData: FormData): ProductFormValues {
     condition: (itemStatus === "new" ? "new" : text(formData, "condition")) as Condition,
     conditionNotes: text(formData, "conditionNotes"),
     description: text(formData, "description"),
+    lightUp: lightUp === "yes" || lightUp === "no" ? lightUp : "",
+    // Checked by validateProduct; "" if it's missing or unknown.
+    lightUpCondition: (LIGHT_UP_CONDITION_VALUES as string[]).includes(lightUpCondition)
+      ? (lightUpCondition as LightUpCondition)
+      : ("" as LightUpCondition),
+    lightUpActivation: text(formData, "lightUpActivation").replace(/\s+/g, " "),
     price: text(formData, "price"),
+    salePrice: text(formData, "salePrice"),
+    // Only the Add Product form has this box; saves always send the item code.
+    autoItemCode: formData.get("autoItemCode") === "on",
     itemCode: text(formData, "itemCode").toUpperCase(),
     slug: text(formData, "slug").toLowerCase(),
     sizes: parseSizes(text(formData, "sizes")) ?? [],
@@ -161,10 +228,26 @@ export function readProductForm(formData: FormData): ProductFormValues {
 }
 
 const ITEM_CODE = /^[A-Z0-9]+(-[A-Z0-9]+)*$/;
+/** The form automatic item codes take (supabase/migrations/20261101130000_item_codes_and_sale_prices.sql). */
+export const AUTO_ITEM_CODE = /^ITEM-[0-9]+$/;
 const SLUG = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
-/** Checks the form values; returns database fields or per-field messages. */
-export function validateProduct(values: ProductFormValues):
+/** Control characters (other than the spaces already tidied away). */
+const CONTROL = /\p{Cc}/u;
+
+/**
+ * Checks the form values; returns database fields or per-field messages.
+ *
+ * The label name: one that was typed or changed must fit the label
+ * (lib/labels/name-fit.ts). One that is unchanged since the form was loaded
+ * (savedLabelName) never blocks saving other changes, and neither does a
+ * product name too wide for the label: the form and the label page flag
+ * those, and printing is refused until the label name is fixed.
+ */
+export function validateProduct(
+  values: ProductFormValues,
+  { savedLabelName = "", savedItemCode = "" }: { savedLabelName?: string; savedItemCode?: string } = {},
+):
   | { ok: true; fields: ProductFields; sizes: SizeRow[]; values: ProductFormValues }
   | { ok: false; errors: FieldErrors } {
   const errors: FieldErrors = {};
@@ -172,6 +255,26 @@ export function validateProduct(values: ProductFormValues):
 
   if (!values.name) errors.name = "Enter the product name.";
   else if (tooLong(values.name, LIMITS.name)) errors.name = `Keep the name under ${LIMITS.name} characters.`;
+
+  if (tooLong(values.labelName, LIMITS.labelName)) {
+    errors.labelName = `Keep the label name under ${LIMITS.labelName} characters.`;
+  } else if (CONTROL.test(values.labelName)) {
+    errors.labelName = labelNameFor({ labelName: values.labelName, name: values.name }).problem!;
+  } else if (values.labelName && values.labelName !== tidyLabelName(savedLabelName)) {
+    const problem = labelNameFor({ labelName: values.labelName, name: values.name }).problem;
+    if (problem) errors.labelName = problem;
+  }
+
+  if (values.lightUp === "yes" && !(LIGHT_UP_CONDITION_VALUES as string[]).includes(values.lightUpCondition)) {
+    errors.lightUpCondition = "Choose whether the lights work.";
+  }
+  if (values.lightUp === "yes") {
+    if (tooLong(values.lightUpActivation, LIMITS.lightUpActivation)) {
+      errors.lightUpActivation = `Keep it under ${LIMITS.lightUpActivation} characters.`;
+    } else if (CONTROL.test(values.lightUpActivation)) {
+      errors.lightUpActivation = "Use plain text on one line.";
+    }
+  }
   if (!values.brand) errors.brand = "Enter the brand, or “Unbranded”.";
   else if (tooLong(values.brand, LIMITS.brand)) errors.brand = `Keep the brand under ${LIMITS.brand} characters.`;
   if (!values.colour) errors.colour = "Enter the colour, e.g. “White/Orange”.";
@@ -195,11 +298,24 @@ export function validateProduct(values: ProductFormValues):
   else if (paisa === null) errors.price = "Enter the price in rupees, e.g. 8500 or 8500.50.";
   else if (paisa > LIMITS.priceRupees * 100) errors.price = "That price is over Rs. 10,00,000. Check for an extra digit.";
 
-  if (!values.itemCode) errors.itemCode = "Enter an item code, e.g. PL-M-1001.";
+  const sale = values.salePrice ? rupeesToPaisa(values.salePrice) : null;
+  if (values.salePrice) {
+    if (sale === null) errors.salePrice = "Enter the sale price in rupees, e.g. 6800, or leave it empty for no sale.";
+    else if (sale <= 0) errors.salePrice = "A sale price must be above zero. Leave it empty for no sale.";
+    else if (paisa !== null && !errors.price && sale >= paisa) {
+      errors.salePrice = `The sale price must be lower than the regular price (${formatPaisa(paisa)}). Lower it, or clear it to end the sale.`;
+    }
+  }
+
+  if (values.autoItemCode) {
+    // Assigned by the database when the draft is created.
+  } else if (!values.itemCode) errors.itemCode = "Enter an item code, e.g. PL-M-1001.";
   else if (!ITEM_CODE.test(values.itemCode) || tooLong(values.itemCode, LIMITS.itemCode)) {
     errors.itemCode = "Use capital letters and numbers separated by single hyphens, e.g. PL-M-1001.";
-  } else if (BARCODE_PATTERN.test(values.itemCode)) {
-    errors.itemCode = "An item code can’t look like a barcode (U followed by 8 digits). Use a different code.";
+  } else if (looksLikeBarcode(values.itemCode)) {
+    errors.itemCode = "An item code can’t look like a barcode (KNS or U followed by 8 digits). Use a different code.";
+  } else if (AUTO_ITEM_CODE.test(values.itemCode) && values.itemCode !== savedItemCode) {
+    errors.itemCode = "Codes like ITEM-000123 are assigned automatically. Choose “Automatically generate”, or use a different code.";
   }
 
   const slug = values.slug || suggestSlug(values);
@@ -221,7 +337,13 @@ export function validateProduct(values: ProductFormValues):
       const stock = Number(row.stock);
       if (values.itemStatus === "preloved" && stock > 1) return "A pre-loved pair’s stock is 1 (for sale) or 0 (sold).";
       if (sizes.some((s) => s.size === size)) return `EU ${size} is listed twice.`;
-      sizes.push({ size, stock });
+      sizes.push({
+        size,
+        stock,
+        ...(row.stockWas !== undefined && row.inventoryVersion !== undefined
+          ? { stock_was: Number(row.stockWas), inventory_version: Number(row.inventoryVersion) }
+          : {}),
+      });
     }
     return null;
   })();
@@ -233,7 +355,8 @@ export function validateProduct(values: ProductFormValues):
     values: { ...values, slug },
     sizes,
     fields: {
-      item_code: values.itemCode,
+      item_code: values.autoItemCode ? null : values.itemCode,
+      auto_item_code: values.autoItemCode,
       slug,
       name: values.name,
       brand: values.brand,
@@ -245,6 +368,11 @@ export function validateProduct(values: ProductFormValues):
       colour: values.colour,
       description: values.description,
       price_paisa: paisa!,
+      sale_price_paisa: sale,
+      label_name: values.labelName || null,
+      light_up: values.lightUp === "" ? null : values.lightUp === "yes",
+      light_up_condition: values.lightUp === "yes" ? values.lightUpCondition : null,
+      light_up_activation: values.lightUp === "yes" ? values.lightUpActivation || null : null,
     },
   };
 }

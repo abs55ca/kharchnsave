@@ -58,6 +58,19 @@ function stockText(product: ScanProduct, stock: number) {
   return String(stock);
 }
 
+/** The price to charge: the sale price while on sale, with the regular price struck through. */
+function ChargePrice({ product }: { product: ScanProduct }) {
+  if (product.salePricePaisa === null) return <strong>{formatPrice(product.pricePaisa / 100)}</strong>;
+  return (
+    <>
+      <strong>{formatPrice(product.salePricePaisa / 100)}</strong>{" "}
+      <span className="text-sm font-normal text-muted">
+        (regular <s className="decoration-danger">{formatPrice(product.pricePaisa / 100)}</s>)
+      </span>
+    </>
+  );
+}
+
 function labelHref(product: ScanProduct, size?: number) {
   return `/admin/products/${product.id}/labels${size === undefined ? "" : `?size=${size}`}`;
 }
@@ -100,8 +113,10 @@ function UnitCard({ product, unit, matchedBy }: { product: ScanProduct; unit: Sc
           <dd className="text-lg font-bold">{labelSize(unit.size)}</dd>
         </div>
         <div>
-          <dt className="text-xs text-muted">Price</dt>
-          <dd className="text-lg font-bold">{formatPrice(product.pricePaisa / 100)}</dd>
+          <dt className="text-xs text-muted">{product.salePricePaisa !== null ? "Sale price" : "Price"}</dt>
+          <dd className="text-lg font-bold">
+            <ChargePrice product={product} />
+          </dd>
         </div>
         <div>
           <dt className="text-xs text-muted">Stock</dt>
@@ -144,7 +159,7 @@ function ProductCard({ product }: { product: ScanProduct }) {
     <article aria-label="Scan result" className="rounded-lg border border-line p-5">
       <ProductHeading product={product} />
       <p className="mt-4 text-sm">
-        Found by item code. Price: <strong>{formatPrice(product.pricePaisa / 100)}</strong>
+        Found by item code. {product.salePricePaisa !== null ? "Sale price" : "Price"}: <ChargePrice product={product} />
       </p>
       <div className="mt-3 space-y-2">
         {productNotes(product).map((note) => (
@@ -253,14 +268,29 @@ export function ScanOutcome({ input, result, failed }: { input: ScanInput; resul
   if (result.kind === "retired") {
     return (
       <Problem title="This label is no longer in use">
-        <p>
-          Barcode {code} belonged to {labelSize(result.size)}
-          {result.product ? <> of {fullName(result.product)}</> : null} (SKU{" "}
-          <span className="font-mono">{result.sku}</span> at the time), a size that was removed before the product was
-          published. Barcodes are never reused. Take this label off and print a new one from the product page.
-        </p>
-        {result.product ? (
+        {result.currentBarcode ? (
           <p>
+            Barcode {code} belonged to {labelSize(result.size)}
+            {result.product ? <> of {fullName(result.product)}</> : null} (SKU{" "}
+            <span className="font-mono">{result.sku}</span> at the time). That size’s barcode is now{" "}
+            <span className="font-mono">{result.currentBarcode}</span>. Barcodes are never reused. Take this label off
+            and print a new one.
+          </p>
+        ) : (
+          <p>
+            Barcode {code} belonged to {labelSize(result.size)}
+            {result.product ? <> of {fullName(result.product)}</> : null} (SKU{" "}
+            <span className="font-mono">{result.sku}</span> at the time), a size that was removed before the product was
+            published. Barcodes are never reused. Take this label off and print a new one from the product page.
+          </p>
+        )}
+        {result.product ? (
+          <p className="flex flex-wrap gap-x-4">
+            {result.currentBarcode ? (
+              <Link href={labelHref(result.product, result.size)} className="font-semibold text-forest underline">
+                Print the new label
+              </Link>
+            ) : null}
             <Link href={`/admin/products/${result.product.id}`} className="font-semibold text-forest underline">
               Open {result.product.itemCode}
             </Link>

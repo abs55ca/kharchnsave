@@ -1,11 +1,13 @@
 import { isValidBarcode } from "@/lib/barcodes/code";
-import { fullName } from "@/lib/catalog/product-utils";
+import { labelNameFor, NAME_BOX_DOTS, NAME_FONT_DOTS } from "./name-fit";
 
 /*
  * Shelf labels for the shop's Zebra printer: 2 × 1 inch labels at 203 dpi
- * (406 × 203 dots), ZPL. Each label has a short shoe name, the EU size, a
- * Code 128 barcode and the barcode's readable ID underneath. No shop
- * branding, and no price (prices change; the barcode looks them up).
+ * (406 × 203 dots), ZPL. Each label has the product's label name (or its
+ * full name), the EU size, a Code 128 barcode and the barcode's readable ID
+ * underneath. No shop branding, and no price (prices change; the barcode
+ * looks them up). A name that doesn't fit is refused, never cut short
+ * (./name-fit.ts).
  *
  * The positions are the ones that printed correctly on the shop's ZD888 with
  * ^LT20 (label top). Pure functions: used by the label page in the browser
@@ -28,16 +30,16 @@ export const LABEL = {
   edgeToleranceDots: 8,
 } as const;
 
-// Printed and checked on the ZD888: an 18-character name ("New Balance 574 Wh")
-// and "EU 42.5" each fit on one line. Both text boxes keep at least 28 dots
-// (3.5 mm) from the label's edges.
+// Printed and checked on the ZD888: "New Balance 574 Wh" and "EU 42.5" each
+// fit on one line. Both text boxes keep at least 28 dots (3.5 mm) from the
+// label's edges.
 const LAYOUT = {
   topY: 14,
-  topFont: 26,
+  topFont: NAME_FONT_DOTS,
   // The name's field ends before the size's field starts, so even a name
-  // wider than expected wraps inside its own box and never reaches the size.
+  // wider than expected stays inside its own box and never reaches the size.
   nameX: 28,
-  nameWidth: 228, // x 28–256
+  nameWidth: NAME_BOX_DOTS, // x 28–256
   sizeX: 266,
   sizeWidth: 112, // x 266–378
   barcodeY: 46,
@@ -45,8 +47,6 @@ const LAYOUT = {
   idFont: 30,
 } as const;
 
-/** Longest short name; checked with the calibration labels below. */
-export const LABEL_NAME_MAX = 18;
 export const LABEL_QUANTITY_MAX = 100;
 /** Longest barcode data that fits with quiet zones, even if every character is encoded in Code B. */
 export const MAX_BARCODE_CHARS = 12;
@@ -65,8 +65,8 @@ export type Code128Plan = {
 
 /**
  * Encodes data as Code B, switching to Code C (two digits per symbol) for a
- * trailing run of an even number of digits, e.g. U00000013 → ">:U>500000013":
- * 6 symbols, 101 modules, 202 dots. Explicit switches make the width exact.
+ * trailing run of an even number of digits, e.g. KNS00000013 → ">:KNS>500000013":
+ * 8 symbols, 123 modules, 246 dots. Explicit switches make the width exact.
  */
 export function planCode128(data: string): Code128Plan {
   if (!/^[A-Z0-9.-]+$/.test(data)) throw new Error("Barcode data must be capital letters, digits, hyphens or full stops.");
@@ -100,39 +100,21 @@ export function worstCaseCode128Dots(length: number) {
 /* ---------- Text ---------- */
 
 /**
- * Text safe inside a ZPL field: no ^ or ~ (command prefixes) or \ (escape),
- * no control characters, and only characters the printer's font has.
+ * A ^FD field for printable text (already checked by ./name-fit.ts, so
+ * printable ASCII and Latin-1 letters only, no control characters). ^ and ~
+ * start ZPL commands even inside data, so if the text has either (or \, or
+ * _, the escape character), the field gets ^FH and they're sent as hex
+ * escapes (_5E, _7E, _5C, _5F) and print as themselves. Other text is sent
+ * as it is (^CI28: UTF-8).
  */
-export function labelText(value: string) {
-  return value
-    .normalize("NFKC")
-    .replace(/[\^~\\]/g, " ")
-    .replace(/[^ -~ -ÿ]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+export function fieldData(text: string) {
+  if (!/[\^~\\_]/.test(text)) return `^FD${text}`;
+  return `^FH_^FD${text.replace(/[\^~\\_]/g, (char) => `_${char.charCodeAt(0).toString(16).toUpperCase()}`)}`;
 }
 
-/**
- * Brand and name, shortened to whole words that fit LABEL_NAME_MAX, e.g.
- * "New Balance Fresh Foam X 1080" → "New Balance Fresh". A first word that
- * is too long on its own is cut.
- */
-export function shortLabelName(brand: string, name: string, max = LABEL_NAME_MAX) {
-  const text = labelText(fullName({ brand, name }));
-  if (text.length <= max) return text;
-  let short = "";
-  for (const word of text.split(" ")) {
-    const next = short ? `${short} ${word}` : word;
-    if (next.length > max) break;
-    short = next;
-  }
-  return short || text.slice(0, max);
-}
-
-/** An admin's own short name for this print, or the default. */
-export function chooseLabelName(custom: unknown, fallback: string) {
-  const text = typeof custom === "string" ? labelText(custom).slice(0, LABEL_NAME_MAX).trim() : "";
-  return text || fallback;
+/** A ^FX comment: printable ASCII only, no command characters. */
+function commentText(value: string) {
+  return value.replace(/[^ -~]|[\^~\\]/g, " ").replace(/\s+/g, " ").trim();
 }
 
 export function labelSize(size: number) {
@@ -157,7 +139,7 @@ export function parseQuantity(value: unknown, { allowZero = false } = {}) {
 /* ---------- Labels ---------- */
 
 export type LabelSpec = {
-  /** Already shortened (shortLabelName / chooseLabelName). */
+  /** The name to print: labelNameFor(product).text. Refused if it doesn't fit. */
   name: string;
   size: number;
   barcode: string;
@@ -165,33 +147,27 @@ export type LabelSpec = {
 };
 
 /** One label format, printed `quantity` times. */
-export function buildLabel(
-  spec: LabelSpec,
-  { nameBlock = "FB", comment }: { nameBlock?: "FB" | "TB"; comment?: string } = {},
-) {
+export function buildLabel(spec: LabelSpec, { comment }: { comment?: string } = {}) {
   if (!isValidBarcode(spec.barcode)) throw new Error("Not a valid barcode.");
   if (!Number.isInteger(spec.quantity) || spec.quantity < 1 || spec.quantity > LABEL_QUANTITY_MAX) {
     throw new Error(`Print 1 to ${LABEL_QUANTITY_MAX} labels.`);
   }
+  const name = labelNameFor({ labelName: spec.name, name: "" });
+  if (name.problem) throw new Error(name.problem);
   const plan = planCode128(spec.barcode);
   if (plan.dots > MAX_SYMBOL_DOTS) throw new Error("The barcode is too wide for the label.");
   const barcodeX = Math.floor((LABEL.widthDots - plan.dots) / 2);
-  const name = labelText(spec.name);
-  const nameField =
-    nameBlock === "TB"
-      ? `^TBN,${LAYOUT.nameWidth},${LAYOUT.topFont + 4}`
-      : `^FB${LAYOUT.nameWidth},1,0,L`;
 
   return [
     "^XA",
-    ...(comment ? [`^FX ${labelText(comment)}`] : []),
+    ...(comment ? [`^FX ${commentText(comment)}`] : []),
     "^CI28",
     `^PW${LABEL.widthDots}`,
     `^LL${LABEL.heightDots}`,
     `^LT${LABEL.topDots}`,
     `^PR${LABEL.printSpeed}`,
     "^LH0,0",
-    `^FO${LAYOUT.nameX},${LAYOUT.topY}^A0N,${LAYOUT.topFont},${LAYOUT.topFont}${nameField}^FD${name}^FS`,
+    `^FO${LAYOUT.nameX},${LAYOUT.topY}^A0N,${LAYOUT.topFont},${LAYOUT.topFont}^FB${LAYOUT.nameWidth},1,0,L${fieldData(name.text)}^FS`,
     `^FO${LAYOUT.sizeX},${LAYOUT.topY}^A0N,${LAYOUT.topFont},${LAYOUT.topFont}^FB${LAYOUT.sizeWidth},1,0,R^FD${labelSize(spec.size)}^FS`,
     `^BY${LABEL.moduleDots}`,
     `^FO${barcodeX},${LAYOUT.barcodeY}^BCN,${LABEL.barcodeHeightDots},N,N,N,N^FD${plan.field}^FS`,
@@ -208,30 +184,33 @@ export function buildLabels(specs: LabelSpec[]) {
 }
 
 /**
- * Three test labels for checking the layout on the printer:
- * 1. the worst case: 18 × "W" (wider than the name's box, so it overprints
- *    inside that box) next to the widest size; it must never reach the size;
- * 2. the verified reference: an 18-character name, "New Balance 574 Wh",
- *    with "EU 42.5", both on one line;
- * 3. the same as 1, but with ^TB (text block). If the firmware supports ^TB,
- *    the name is cut off inside its box; if it doesn't, the name prints
- *    across the label.
+ * Names for the calibration labels, each as wide as the width check
+ * (./name-fit.ts) allows, or close to it. On the printer, every one must
+ * print on a single line, clear of "EU 42.5". If one wraps or prints over
+ * itself, the width model is too generous: increase NAME_SPARE_DOTS.
  */
+export const CALIBRATION_NAMES = [
+  // 1. The widest character: 11 × W, about 222 dots.
+  "WWWWWWWWWWW",
+  // 2. The reference that printed correctly before (about 213 dots).
+  "New Balance 574 Wh",
+  // 3. The narrowest characters: 37 × l, about 220 dots.
+  "l".repeat(37),
+  // 4. A typical name with accents and digits, exactly at the limit (224 dots).
+  "Écru Navy Trainers 31",
+] as const;
+
+/** Four test labels for checking the name's width on the printer (CALIBRATION_NAMES), each next to EU 42.5. */
 export function calibrationLabels() {
-  const widest = "W".repeat(LABEL_NAME_MAX);
-  const labels = [
-    buildLabel(
-      { name: widest, size: 42.5, barcode: "U99999992", quantity: 1 },
-      { comment: "Calibration 1: widest name next to the widest size" },
-    ),
-    buildLabel(
-      { name: shortLabelName("New Balance", "574 Wh"), size: 42.5, barcode: "U00000013", quantity: 1 },
-      { comment: "Calibration 2: verified 18-character name with EU 42.5" },
-    ),
-    buildLabel(
-      { name: `${widest}WWWWWW`, size: 42.5, barcode: "U12345671", quantity: 1 },
-      { nameBlock: "TB", comment: "Calibration 3: text block (TB) test" },
-    ),
+  const barcodes = ["KNS99999992", "KNS00000013", "KNS12345671", "KNS00000021"];
+  const comments = [
+    "Calibration 1: widest characters at the width limit",
+    "Calibration 2: verified reference name",
+    "Calibration 3: narrowest characters at the width limit",
+    "Calibration 4: accents and digits at the width limit",
   ];
+  const labels = CALIBRATION_NAMES.map((name, index) =>
+    buildLabel({ name, size: 42.5, barcode: barcodes[index], quantity: 1 }, { comment: comments[index] }),
+  );
   return `${labels.join("\n")}\n`;
 }

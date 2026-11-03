@@ -1,3 +1,5 @@
+import type { LightUp } from "./light-up";
+
 export type Department = "men" | "women" | "kids";
 
 export type Style =
@@ -52,11 +54,18 @@ export type Product = {
   conditionNotes: string[];
   colour: string;
   /**
-   * Price in Pakistani rupees. The database stores paisa (`price_paisa`);
-   * lib/catalog/supabase-catalog.ts converts it, and nothing else should.
+   * What a shopper pays now, in Pakistani rupees: the sale price while there
+   * is one, otherwise the regular price. Sorting, price filters, the cart and
+   * checkout all use it. The database stores paisa (`price_paisa`,
+   * `sale_price_paisa`); lib/catalog/pricing.ts converts them, and nothing
+   * else should.
    */
   price: number;
+  /** The regular price while on sale (higher than `price`); null when not on sale. */
+  regularPrice: number | null;
   description: string;
+  /** Light-up soles and whether they work; null if it has none or it isn't recorded. */
+  lightUp: LightUp | null;
   images: ProductImage[];
   variants: ProductVariant[];
   /** ISO date the listing went live, used for "newest" sorting. */

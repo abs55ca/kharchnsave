@@ -1,7 +1,7 @@
 import { PDFDocument, rgb } from "pdf-lib";
 import QRCode from "qrcode";
 import sharp from "sharp";
-import { K_MARK_PATHS, K_MARK_VIEWBOX } from "@/lib/brand/k-mark";
+import { K_MARK, K_MARK_WHITE, type BrandMark } from "@/lib/brand/k-mark";
 import { QR_CODE_URL } from "@/lib/links";
 
 /*
@@ -10,13 +10,24 @@ import { QR_CODE_URL } from "@/lib/links";
  * a fixed address that redirects to wherever lib/links.ts says, so the
  * artwork never needs reprinting.
  *
- * Version 6 (41 × 41 modules), error correction H (each of its 4 blocks can
- * correct 14 damaged codewords), a 4-module white border, forest-green
- * modules on white. The K mark sits on a white rounded tile of exactly 15 × 15
- * modules in the centre; every module under the tile is cleared as a whole
- * (no partial slivers). Of the 8 valid mask patterns, the one that leaves the
- * fewest damaged codewords in the worst block is used, so the most error
+ * Two designs, same structure: version 6 (41 × 41 modules), error correction
+ * H (each of its 4 blocks can correct 14 damaged codewords), a 4-module quiet
+ * zone, and the K mark in the centre on a cleared area of exactly 15 × 15
+ * modules (whole modules cleared, no partial slivers, no tile behind the
+ * mark).
+ *
+ * - main: white modules on forest green with the white K mark. This is an
+ *   INVERTED code (light modules on a dark background): scanners must
+ *   support inverted codes, which most phone camera apps do but not all.
+ * - light: forest-green modules on white with the green K mark, a normal
+ *   code, for merchandise where scanning reliability matters more than looks.
+ *
+ * For each design, of the 8 valid mask patterns the one that leaves the
+ * fewest misread codewords in the worst block is used, so the most error
  * correction remains for scratches and blur.
+ *
+ * In QR terms a "dark" module is one that is set (drawn in the design's
+ * module colour); the background is "light", whatever the actual colours.
  *
  * Node only (sharp, pdf-lib): used by scripts/generate-qr.ts and the tests,
  * never by the website.
@@ -28,41 +39,76 @@ export const MERCH_QR = {
   errorCorrectionLevel: "H",
   /** Version 6-H: 4 blocks of 15 data + 28 error-correction codewords. */
   blocks: { count: 4, dataCodewords: 15, ecCodewords: 28 },
-  /** White border (quiet zone) on every side, in modules. */
+  /** Quiet zone on every side, in modules (background colour). */
   border: 4,
-  dark: "#163a2c",
-  light: "#ffffff",
-  /** The logo tile: exactly this many modules square, centred. Never larger. */
-  tileModules: 15,
-  tileRadiusModules: 2,
-  /** White space between the tile's edge and the K mark, in modules. */
+  /** The cleared area for the logo: exactly this many modules square, centred. Never larger. */
+  logoAreaModules: 15,
+  /** Space between the cleared area's edge and the K mark, in modules. */
   logoPaddingModules: 1.5,
-  /** Printed size of the SVG and PDF, border included (any size can be printed; it's vector). */
+  /** Printed size of the SVG and PDF, quiet zone included (any size can be printed; it's vector). */
   printSizeMm: 50,
   pngPixels: 2000,
 } as const;
 
-export const MERCH_QR_FILES = {
-  svg: "merch/qr/kharchnsave-qr.svg",
-  pdf: "merch/qr/kharchnsave-qr.pdf",
-  png: "merch/qr/kharchnsave-qr.png",
-} as const;
+export type MerchQrDesign = {
+  id: "main" | "light";
+  description: string;
+  /** Background and quiet zone. */
+  background: string;
+  /** The modules ("dark" in QR terms). */
+  moduleColor: string;
+  logo: BrandMark;
+  /** Light modules on a dark background: scanners must read it as an inverted code. */
+  inverted: boolean;
+  files: { svg: string; pdf: string; png: string };
+};
+
+export const MERCH_QR_DESIGNS: Record<MerchQrDesign["id"], MerchQrDesign> = {
+  main: {
+    id: "main",
+    description: "white modules and K mark on forest green (inverted)",
+    background: "#163a2c",
+    moduleColor: "#ffffff",
+    logo: K_MARK_WHITE,
+    inverted: true,
+    files: {
+      svg: "merch/qr/kharchnsave-qr.svg",
+      pdf: "merch/qr/kharchnsave-qr.pdf",
+      png: "merch/qr/kharchnsave-qr.png",
+    },
+  },
+  light: {
+    id: "light",
+    description: "forest-green modules and K mark on white (fallback)",
+    background: "#ffffff",
+    moduleColor: "#163a2c",
+    logo: K_MARK,
+    inverted: false,
+    files: {
+      svg: "merch/qr/light/kharchnsave-qr-light.svg",
+      pdf: "merch/qr/light/kharchnsave-qr-light.pdf",
+      png: "merch/qr/light/kharchnsave-qr-light.png",
+    },
+  },
+};
 
 export type MerchQr = {
   url: string;
-  /** Modules per side, without the border (41 for version 6). */
+  design: MerchQrDesign;
+  /** Modules per side, without the quiet zone (41 for version 6). */
   size: number;
   mask: number;
-  /** modules[row][col]: true = dark, after clearing the tile. */
+  /** modules[row][col]: true = a set ("dark") module, drawn in the module colour; the logo area is cleared. */
   modules: boolean[][];
-  /** The tile in module coordinates (without the border). */
-  tile: { start: number; size: number };
-  /** Dark modules removed under the tile. */
-  clearedDarkModules: number;
+  /** The cleared logo area in module coordinates (without the quiet zone). */
+  logoArea: { start: number; size: number };
+  /** Set modules removed from the logo area. */
+  clearedModules: number;
   /**
-   * Codewords a scanner misreads under the tile and mark, per error-correction
+   * Codewords a scanner misreads in the logo area, per error-correction
    * block: `certain` ones always, `worstCase` also counting codewords that
-   * touch an edge of the mark (which scanners may read either way).
+   * touch an edge of the mark or the lime tag (which scanners may read
+   * either way).
    */
   misreadCodewordsPerBlock: { certain: number[]; worstCase: number[] };
   /** Codewords each block can correct. */
@@ -111,76 +157,86 @@ export function blockOfCodeword(index: number) {
   return index < dataTotal ? index % count : (index - dataTotal) % count;
 }
 
-function tileRange(size: number) {
-  const start = (size - MERCH_QR.tileModules) / 2;
-  if (!Number.isInteger(start)) throw new Error("The tile must be centred on whole modules.");
-  return { start, end: start + MERCH_QR.tileModules };
+function logoAreaRange(size: number) {
+  const start = (size - MERCH_QR.logoAreaModules) / 2;
+  if (!Number.isInteger(start)) throw new Error("The logo area must be centred on whole modules.");
+  return { start, end: start + MERCH_QR.logoAreaModules };
 }
 
-type Reading = "dark" | "light" | "either";
+type Reading = "module" | "background" | "either";
+
+function hexToRgbBytes(hex: string) {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
 
 /**
- * What a scanner reads under the tile, found by rendering the mark at its
- * exact position and looking at the middle half of each module: "dark" where
- * the green K covers all of it, "light" where it is plain white, and
- * "either" otherwise. That covers edges of the mark (scanners sample slightly
- * different points) and the lime tag, which a scanner's local threshold can
- * read as dark when the only thing around it is white.
+ * What a scanner reads in the logo area, found by rendering the mark at its
+ * exact position on the design's background and looking at the middle half
+ * of each module: "module" where it is all module colour (e.g. the white K on
+ * the main design), "background" where it is plain background, and "either"
+ * otherwise. That covers edges of the mark (scanners sample slightly
+ * different points) and the lime tag, which is neither colour and which a
+ * scanner's local threshold can read either way.
  */
-async function logoReadings(size: number) {
+async function logoReadings(size: number, design: MerchQrDesign) {
   const pixelsPerModule = 16;
   const pixels = size * pixelsPerModule;
-  const logo = logoPlacementFor(size, 0);
+  const logo = logoPlacementFor(size, 0, design.logo);
+  const { x, y } = design.logo.viewBox;
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${pixels}" height="${pixels}" viewBox="0 0 ${size} ${size}">` +
-    `<rect width="${size}" height="${size}" fill="#fff"/>` +
-    `<g transform="translate(${logo.x} ${logo.y}) scale(${logo.scale}) translate(${-K_MARK_VIEWBOX.x} ${-K_MARK_VIEWBOX.y})">` +
-    K_MARK_PATHS.map((path) => `<path fill="${path.fill}" d="${path.d}"/>`).join("") +
+    `<rect width="${size}" height="${size}" fill="${design.background}"/>` +
+    `<g transform="translate(${logo.x} ${logo.y}) scale(${logo.scale}) translate(${-x} ${-y})">` +
+    design.logo.paths.map((path) => `<path fill="${path.fill}" d="${path.d}"/>`).join("") +
     "</g></svg>";
-  const { data, info } = await sharp(Buffer.from(svg)).greyscale().raw().toBuffer({ resolveWithObject: true });
+  const { data, info } = await sharp(Buffer.from(svg)).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const moduleRgb = hexToRgbBytes(design.moduleColor);
+  const backgroundRgb = hexToRgbBytes(design.background);
+  const near = (i: number, [r, g, b]: number[]) => Math.hypot(data[i] - r, data[i + 1] - g, data[i + 2] - b) < 24;
   const quarter = pixelsPerModule / 4;
   return (row: number, col: number): Reading => {
-    let dark = 0;
-    let white = 0;
-    let other = 0;
-    for (let y = row * pixelsPerModule + quarter; y < (row + 1) * pixelsPerModule - quarter; y++) {
-      for (let x = col * pixelsPerModule + quarter; x < (col + 1) * pixelsPerModule - quarter; x++) {
-        const value = data[y * info.width + x];
-        if (value < 128) dark++;
-        else if (value >= 245) white++;
-        else other++;
+    let modulePixels = 0;
+    let backgroundPixels = 0;
+    let otherPixels = 0;
+    for (let py = row * pixelsPerModule + quarter; py < (row + 1) * pixelsPerModule - quarter; py++) {
+      for (let px = col * pixelsPerModule + quarter; px < (col + 1) * pixelsPerModule - quarter; px++) {
+        const i = (py * info.width + px) * info.channels;
+        if (near(i, moduleRgb)) modulePixels++;
+        else if (near(i, backgroundRgb)) backgroundPixels++;
+        else otherPixels++;
       }
     }
-    if (dark > 0 && white === 0 && other === 0) return "dark";
-    if (white > 0 && dark === 0 && other === 0) return "light";
+    if (modulePixels > 0 && backgroundPixels === 0 && otherPixels === 0) return "module";
+    if (backgroundPixels > 0 && modulePixels === 0 && otherPixels === 0) return "background";
     return "either";
   };
 }
 
 function analyse(symbol: Symbol, reading: (row: number, col: number) => Reading) {
   const { size } = symbol.modules;
-  const { start, end } = tileRange(size);
-  const inTile = (row: number, col: number) => row >= start && row < end && col >= start && col < end;
+  const { start, end } = logoAreaRange(size);
+  const inLogoArea = (row: number, col: number) => row >= start && row < end && col >= start && col < end;
   const { count, dataCodewords, ecCodewords } = MERCH_QR.blocks;
   const totalCodewords = count * (dataCodewords + ecCodewords);
 
   const certain = new Set<number>();
   const possible = new Set<number>();
-  let clearedDarkModules = 0;
+  let clearedModules = 0;
   dataModulePositions(symbol).forEach(([row, col], bit) => {
-    if (!inTile(row, col)) return;
-    const dark = !!symbol.modules.get(row, col);
-    if (dark) clearedDarkModules++;
+    if (!inLogoArea(row, col)) return;
+    const set = !!symbol.modules.get(row, col);
+    if (set) clearedModules++;
     const codeword = Math.floor(bit / 8);
     if (codeword >= totalCodewords) return; // the last few bits are padding
-    // A module is misread when the tile or the mark shows the opposite of its value.
+    // A module is misread when the background or the mark shows the opposite of its value.
     const seen = reading(row, col);
     if (seen === "either") possible.add(codeword);
-    else if ((seen === "dark") !== dark) certain.add(codeword);
+    else if ((seen === "module") !== set) certain.add(codeword);
   });
   for (let row = start; row < end; row++) {
     for (let col = start; col < end; col++) {
-      if (symbol.modules.isReserved(row, col)) throw new Error("The tile would cover a function pattern.");
+      if (symbol.modules.isReserved(row, col)) throw new Error("The logo area would cover a function pattern.");
     }
   }
 
@@ -188,13 +244,16 @@ function analyse(symbol: Symbol, reading: (row: number, col: number) => Reading)
   const worstPerBlock = Array.from({ length: count }, () => 0);
   for (const codeword of certain) certainPerBlock[blockOfCodeword(codeword)]++;
   for (const codeword of new Set([...certain, ...possible])) worstPerBlock[blockOfCodeword(codeword)]++;
-  return { clearedDarkModules, certainPerBlock, worstPerBlock, inTile };
+  return { clearedModules, certainPerBlock, worstPerBlock, inLogoArea };
 }
 
-/** Builds the code for MERCH_QR.url with the mask that leaves the most error correction to spare. */
-export async function buildMerchQr(url: string = MERCH_QR.url): Promise<MerchQr> {
+/** Builds the code in `design` with the mask that leaves the most error correction to spare. */
+export async function buildMerchQr(
+  design: MerchQrDesign = MERCH_QR_DESIGNS.main,
+  url: string = MERCH_QR.url,
+): Promise<MerchQr> {
   const size = 17 + 4 * MERCH_QR.version;
-  const reading = await logoReadings(size);
+  const reading = await logoReadings(size, design);
   const candidates = Array.from({ length: 8 }, (_, mask) => {
     const symbol = QRCode.create(url, {
       version: MERCH_QR.version,
@@ -209,24 +268,25 @@ export async function buildMerchQr(url: string = MERCH_QR.url): Promise<MerchQr>
   const best = [...candidates].sort((a, b) => a.worst - b.worst || a.total - b.total || a.mask - b.mask)[0];
 
   const modules = Array.from({ length: size }, (_, row) =>
-    Array.from({ length: size }, (_, col) => !best.inTile(row, col) && !!best.symbol.modules.get(row, col)),
+    Array.from({ length: size }, (_, col) => !best.inLogoArea(row, col) && !!best.symbol.modules.get(row, col)),
   );
   return {
     url,
+    design,
     size,
     mask: best.mask,
     modules,
-    tile: { start: tileRange(size).start, size: MERCH_QR.tileModules },
-    clearedDarkModules: best.clearedDarkModules,
+    logoArea: { start: logoAreaRange(size).start, size: MERCH_QR.logoAreaModules },
+    clearedModules: best.clearedModules,
     misreadCodewordsPerBlock: { certain: best.certainPerBlock, worstCase: best.worstPerBlock },
     correctablePerBlock: Math.floor(MERCH_QR.blocks.ecCodewords / 2),
   };
 }
 
-/* ---------- Drawing (module units, border included) ---------- */
+/* ---------- Drawing (module units, quiet zone included) ---------- */
 
-/** Dark modules as one path: a rectangle per horizontal run, on whole-module coordinates. */
-export function darkModulesPath(qr: MerchQr) {
+/** Set modules as one path: a rectangle per horizontal run, on whole-module coordinates. */
+export function modulesPath(qr: MerchQr) {
   const b = MERCH_QR.border;
   const parts: string[] = [];
   qr.modules.forEach((row, y) => {
@@ -241,35 +301,30 @@ export function darkModulesPath(qr: MerchQr) {
   return parts.join("");
 }
 
-/** The tile's square, in module units with the border: exactly the cleared modules. */
-export function tileRect(qr: MerchQr) {
-  return tileRectFor(qr.size, MERCH_QR.border);
+/** The cleared logo area, in module units with the quiet zone. */
+export function logoAreaRect(qr: MerchQr) {
+  return logoAreaRectFor(qr.size, MERCH_QR.border);
 }
 
-function tileRectFor(size: number, border: number) {
-  const start = tileRange(size).start + border;
-  return { x: start, y: start, size: MERCH_QR.tileModules, radius: MERCH_QR.tileRadiusModules };
+function logoAreaRectFor(size: number, border: number) {
+  const start = logoAreaRange(size).start + border;
+  return { x: start, y: start, size: MERCH_QR.logoAreaModules };
 }
 
-function roundedRectPath({ x, y, size, radius: r }: ReturnType<typeof tileRect>) {
-  const s = size - 2 * r;
-  return `M${x + r} ${y}h${s}a${r} ${r} 0 0 1 ${r} ${r}v${s}a${r} ${r} 0 0 1 -${r} ${r}h-${s}a${r} ${r} 0 0 1 -${r} -${r}v-${s}a${r} ${r} 0 0 1 ${r} -${r}z`;
-}
-
-/** Where the K mark goes: scaled to fit inside the tile's padding, centred. */
+/** Where the K mark goes: scaled to fit inside the logo area's padding, centred. */
 export function logoPlacement(qr: MerchQr) {
-  return logoPlacementFor(qr.size, MERCH_QR.border);
+  return logoPlacementFor(qr.size, MERCH_QR.border, qr.design.logo);
 }
 
-function logoPlacementFor(size: number, border: number) {
-  const tile = tileRectFor(size, border);
-  const box = tile.size - 2 * MERCH_QR.logoPaddingModules;
-  const scale = Math.min(box / K_MARK_VIEWBOX.width, box / K_MARK_VIEWBOX.height);
-  const width = K_MARK_VIEWBOX.width * scale;
-  const height = K_MARK_VIEWBOX.height * scale;
+function logoPlacementFor(size: number, border: number, mark: BrandMark) {
+  const area = logoAreaRectFor(size, border);
+  const box = area.size - 2 * MERCH_QR.logoPaddingModules;
+  const scale = Math.min(box / mark.viewBox.width, box / mark.viewBox.height);
+  const width = mark.viewBox.width * scale;
+  const height = mark.viewBox.height * scale;
   return {
-    x: tile.x + (tile.size - width) / 2,
-    y: tile.y + (tile.size - height) / 2,
+    x: area.x + (area.size - width) / 2,
+    y: area.y + (area.size - height) / 2,
     width,
     height,
     scale,
@@ -280,17 +335,18 @@ const round = (n: number) => Number(n.toFixed(6));
 
 /** The SVG (vector). `width`/`height` set its printed or rendered size, e.g. "50mm" or "2000". */
 export function renderMerchQrSvg(qr: MerchQr, size: string = `${MERCH_QR.printSizeMm}mm`) {
+  const { design } = qr;
   const total = qr.size + 2 * MERCH_QR.border;
   const logo = logoPlacement(qr);
-  const transform = `translate(${round(logo.x)} ${round(logo.y)}) scale(${round(logo.scale)}) translate(${-K_MARK_VIEWBOX.x} ${-K_MARK_VIEWBOX.y})`;
+  const { x, y } = design.logo.viewBox;
+  const transform = `translate(${round(logo.x)} ${round(logo.y)}) scale(${round(logo.scale)}) translate(${-x} ${-y})`;
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${total} ${total}" role="img" aria-label="QR code: ${qr.url}">`,
     `  <title>Kharch n Save: ${qr.url}</title>`,
-    `  <rect width="${total}" height="${total}" fill="${MERCH_QR.light}"/>`,
-    `  <path d="${darkModulesPath(qr)}" fill="${MERCH_QR.dark}" shape-rendering="crispEdges"/>`,
-    `  <path d="${roundedRectPath(tileRect(qr))}" fill="${MERCH_QR.light}"/>`,
+    `  <rect width="${total}" height="${total}" fill="${design.background}"/>`,
+    `  <path d="${modulesPath(qr)}" fill="${design.moduleColor}" shape-rendering="crispEdges"/>`,
     `  <g transform="${transform}">`,
-    ...K_MARK_PATHS.map((path) => `    <path fill="${path.fill}" d="${path.d}"/>`),
+    ...design.logo.paths.map((path) => `    <path fill="${path.fill}" d="${path.d}"/>`),
     "  </g>",
     "</svg>",
     "",
@@ -301,18 +357,19 @@ export function renderMerchQrSvg(qr: MerchQr, size: string = `${MERCH_QR.printSi
 export async function renderMerchQrPng(qr: MerchQr, pixels: number = MERCH_QR.pngPixels) {
   return sharp(Buffer.from(renderMerchQrSvg(qr, String(pixels))))
     .resize(pixels, pixels)
-    .flatten({ background: MERCH_QR.light })
+    .flatten({ background: qr.design.background })
     .png({ compressionLevel: 9 })
     .toBuffer();
 }
 
 function hexToRgb(hex: string) {
-  const n = Number.parseInt(hex.slice(1), 16);
-  return rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
+  const [r, g, b] = hexToRgbBytes(hex.length === 4 ? `#${[...hex.slice(1)].map((c) => c + c).join("")}` : hex);
+  return rgb(r / 255, g / 255, b / 255);
 }
 
 /** A one-page vector PDF, MERCH_QR.printSizeMm square, from the same drawing. */
 export async function renderMerchQrPdf(qr: MerchQr) {
+  const { design } = qr;
   const total = qr.size + 2 * MERCH_QR.border;
   const pageSize = (MERCH_QR.printSizeMm / 25.4) * 72; // points
   const unit = pageSize / total; // points per module
@@ -322,14 +379,13 @@ export async function renderMerchQrPdf(qr: MerchQr) {
   const page = pdf.addPage([pageSize, pageSize]);
 
   // drawSvgPath puts the SVG origin at (x, y) and flips the y axis to SVG's.
-  page.drawRectangle({ x: 0, y: 0, width: pageSize, height: pageSize, color: hexToRgb(MERCH_QR.light) });
-  page.drawSvgPath(darkModulesPath(qr), { x: 0, y: pageSize, scale: unit, color: hexToRgb(MERCH_QR.dark) });
-  page.drawSvgPath(roundedRectPath(tileRect(qr)), { x: 0, y: pageSize, scale: unit, color: hexToRgb(MERCH_QR.light) });
+  page.drawRectangle({ x: 0, y: 0, width: pageSize, height: pageSize, color: hexToRgb(design.background) });
+  page.drawSvgPath(modulesPath(qr), { x: 0, y: pageSize, scale: unit, color: hexToRgb(design.moduleColor) });
   const logo = logoPlacement(qr);
-  for (const path of K_MARK_PATHS) {
+  for (const path of design.logo.paths) {
     page.drawSvgPath(path.d, {
-      x: (logo.x - K_MARK_VIEWBOX.x * logo.scale) * unit,
-      y: pageSize - (logo.y - K_MARK_VIEWBOX.y * logo.scale) * unit,
+      x: (logo.x - design.logo.viewBox.x * logo.scale) * unit,
+      y: pageSize - (logo.y - design.logo.viewBox.y * logo.scale) * unit,
       scale: logo.scale * unit,
       color: hexToRgb(path.fill),
     });

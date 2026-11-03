@@ -1,16 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
-import {
-  buildLabels,
-  chooseLabelName,
-  defaultQuantity,
-  LABEL_NAME_MAX,
-  LABEL_QUANTITY_MAX,
-  labelSize,
-  parseQuantity,
-  type LabelSpec,
-} from "@/lib/labels/zpl";
+import type { LabelName } from "@/lib/labels/name-fit";
+import { buildLabels, defaultQuantity, LABEL_QUANTITY_MAX, labelSize, parseQuantity, type LabelSpec } from "@/lib/labels/zpl";
+import { LabelPreview } from "./label-preview";
 
 type Unit = { size: number; stock: number; barcode: string };
 
@@ -18,27 +12,33 @@ const INPUT =
   "rounded-md border border-line bg-white px-3 text-sm focus:border-forest focus:outline-none focus-visible:outline-2 focus-visible:outline-forest aria-[invalid=true]:border-danger";
 
 /**
- * Label options, a live ZPL preview, Copy ZPL and Download .zpl. The
- * download is a GET to the label route, which reads the sizes and barcodes
- * from the database again; only the short name and quantities come from
- * here. Nothing is sent to the printer directly: the file goes through
- * Zebra Setup Utilities.
+ * Label quantities, a preview, the ZPL, Copy ZPL and Download .zpl. The name
+ * is the product's own label name (or its full name), as saved: the same on
+ * every print and reprint, and changed only on the product page. If it
+ * doesn't fit, nothing can be printed until it's fixed there. The download
+ * is a GET to the label route, which reads the name, sizes and barcodes
+ * from the database again and checks the name the same way; only the
+ * quantities come from here. Nothing is sent to the printer directly: the
+ * file goes through Zebra Setup Utilities.
  */
 export function LabelPrinter({
   productId,
-  defaultName,
+  name,
+  typedName,
   itemStatus,
   units,
   single,
 }: {
   productId: string;
-  defaultName: string;
+  /** labelNameFor(product) */
+  name: LabelName;
+  /** The label name as saved, or the product name: what the preview says it prints as. */
+  typedName: string;
   itemStatus: "new" | "preloved";
   units: Unit[];
   /** One size only (quantity at least 1), rather than every size (0 skips one). */
   single: boolean;
 }) {
-  const [name, setName] = useState(defaultName);
   const [quantities, setQuantities] = useState(() => units.map((unit) => String(defaultQuantity(itemStatus, unit.stock))));
   const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
 
@@ -46,41 +46,43 @@ export function LabelPrinter({
   const invalid = parsed.some((quantity) => quantity === null);
   const specs: LabelSpec[] = units.flatMap((unit, index) => {
     const quantity = parsed[index];
-    return quantity ? [{ name: chooseLabelName(name, defaultName), size: unit.size, barcode: unit.barcode, quantity }] : [];
+    return quantity ? [{ name: name.text, size: unit.size, barcode: unit.barcode, quantity }] : [];
   });
   const total = specs.reduce((sum, spec) => sum + spec.quantity, 0);
 
-  const zpl = invalid || specs.length === 0 ? "" : buildLabels(specs);
+  const zpl = name.problem || invalid || specs.length === 0 ? "" : buildLabels(specs);
 
-  const problem = invalid
-    ? `Quantities are whole numbers from ${single ? 1 : 0} to ${LABEL_QUANTITY_MAX}.`
-    : specs.length === 0
-      ? "Choose at least one label."
-      : null;
+  const problem = name.problem
+    ? null
+    : invalid
+      ? `Quantities are whole numbers from ${single ? 1 : 0} to ${LABEL_QUANTITY_MAX}.`
+      : specs.length === 0
+        ? "Choose at least one label."
+        : null;
 
   return (
     <form method="get" action={`/admin/products/${productId}/labels/download`} className="space-y-6">
-      <div>
-        <label htmlFor="label-name" className="mb-1.5 block text-sm font-semibold">
+      <section aria-labelledby="label-name-heading">
+        <h2 id="label-name-heading" className="mb-1.5 text-sm font-semibold">
           Name on the label
-        </label>
-        <input
-          id="label-name"
-          name="name"
-          value={name}
-          maxLength={LABEL_NAME_MAX}
-          onChange={(event) => {
-            setName(event.target.value);
-            setCopied("idle");
-          }}
-          aria-describedby="label-name-hint"
-          className={`${INPUT} h-10 w-full max-w-sm`}
-        />
-        <p id="label-name-hint" className="mt-1 text-xs text-muted">
-          Up to {LABEL_NAME_MAX} characters ({name.length} used). Only for this print; the product isn’t changed. Left
-          empty, it’s “{defaultName}”.
-        </p>
-      </div>
+        </h2>
+        <LabelPreview name={name} typed={typedName} size={units[0]?.size ?? null} barcode={units[0]?.barcode ?? null} />
+        {name.problem ? (
+          <p role="alert" className="mt-2 text-sm font-medium text-danger">
+            Labels can’t be printed until the name fits.{" "}
+            <Link href={`/admin/products/${productId}#label-name`} className="underline">
+              {name.source === "label-name" ? "Change the label name" : "Add a label name"}
+            </Link>
+          </p>
+        ) : (
+          <p className="mt-2 text-xs text-muted">
+            {name.source === "label-name" ? "The product’s label name." : "The product name (it has no label name)."}{" "}
+            <Link href={`/admin/products/${productId}#label-name`} className="font-semibold text-forest underline">
+              Change it on the product page
+            </Link>
+          </p>
+        )}
+      </section>
 
       <fieldset>
         <legend className="mb-1.5 block text-sm font-semibold">How many labels</legend>

@@ -1,8 +1,9 @@
 -- Barcode tests: format, assignment, uniqueness, immutability, access (RLS)
 -- and the read-only scan lookup.
 --
--- Run after supabase/migrations/20261029200000_variant_barcodes.sql, as the
--- database owner (the Supabase SQL editor runs as postgres).
+-- Run after supabase/migrations/20261029200000_variant_barcodes.sql and
+-- 20261030120000_kns_barcodes.sql, as the database owner (the Supabase SQL
+-- editor runs as postgres).
 -- Everything happens in one transaction that is ROLLED BACK: the test users,
 -- memberships, products and barcodes are never kept, and real data is not
 -- touched. The one thing a rollback can't undo is the barcode serial counter
@@ -94,6 +95,17 @@ create function bc_tests.v(key text) returns integer language sql as $$
   select p.version from public.products p where p.id = bc_tests.p(key);
 $$;
 
+-- Sizes as the admin form sends them when it was opened just now (stock and
+-- inventory version as loaded; 20261031120000_inventory_ledger.sql).
+create function bc_tests.form(product uuid, sizes jsonb) returns jsonb language sql as $$
+  select coalesce(jsonb_agg(
+    case when v.id is null then s
+         else s || jsonb_build_object('stock_was', v.stock, 'inventory_version', v.inventory_version) end
+    order by n), '[]'::jsonb)
+  from jsonb_array_elements(sizes) with ordinality as x (s, n)
+  left join public.product_variants v on v.product_id = product and v.size_eu = (s ->> 'size')::numeric;
+$$;
+
 -- The barcode of a product's size, as the caller can see it.
 create function bc_tests.code(key text, size numeric) returns text language sql as $$
   select b.barcode
@@ -130,15 +142,20 @@ insert into public.admin_members (user_id) values ('a1a1a1a1-0000-4000-8000-0000
 
 select bc_tests.returns('Damm check digit of 572 is 4',
   $q$ select public.barcode_check_digit('572')::text $q$, '4');
-select bc_tests.returns('serial numbers format as U + 7 digits + check digit',
+select bc_tests.returns('serial numbers format as KNS + 7 digits + check digit',
   $q$ select string_agg(public.format_barcode(n), ',' order by n) from unnest(array[1, 2, 14, 1234567, 9999999]) n $q$,
-  'U00000013,U00000021,U00000149,U12345671,U99999992');
+  'KNS00000013,KNS00000021,KNS00000149,KNS12345671,KNS99999992');
 select bc_tests.returns('valid barcodes pass the check',
-  $q$ select bool_and(public.is_valid_barcode(b))::text from unnest(array['U00000013', 'U12345671', 'U99999992']) b $q$, 'true');
-select bc_tests.returns('typos, swapped digits and wrong shapes fail the check',
+  $q$ select bool_and(public.is_valid_barcode(b))::text from unnest(array['KNS00000013', 'KNS12345671', 'KNS99999992']) b $q$, 'true');
+select bc_tests.returns('typos, swapped digits, wrong shapes and U barcodes fail the check',
   $q$ select string_agg(b, ',') from unnest(array[
-        'U00000014', 'U00000031', 'U21345671', 'U12345617', 'u00000013', 'U0000013', 'U000000130', 'X00000013', '', null]) b
+        'KNS00000014', 'KNS00000031', 'KNS21345671', 'KNS12345617', 'kns00000013', 'KN500000013', 'KNS0000013',
+        'KNS000000130', 'KNX00000013', 'U00000013', '', null]) b
       where public.is_valid_barcode(b) $q$, '');
+select bc_tests.returns('retired U barcodes: same digits and check digit, after U',
+  $q$ select string_agg(coalesce(b, '(null)') || '=' || public.is_legacy_barcode(b), ',') from unnest(array[
+        'U00000013', 'U00000084', 'U99999992', 'U00000014', 'u00000013', 'KNS00000013', null]) b $q$,
+  'U00000013=true,U00000084=true,U99999992=true,U00000014=false,u00000013=false,KNS00000013=false,(null)=false');
 
 -- ---------------------------------------------------------------------------
 -- Set-up and access rules
@@ -163,7 +180,7 @@ select bc_tests.returns('API roles cannot use the serial counter',
 select bc_tests.returns('API roles cannot execute the barcode helpers or triggers',
   $q$ select string_agg(r || ' ' || f, ', ') from unnest(array['anon', 'authenticated']) r,
         unnest(array['public.barcode_check_digit(text)', 'public.format_barcode(integer)', 'public.is_valid_barcode(text)',
-                     'public.issue_variant_barcode()', 'public.variant_barcodes_guard()']) f
+                     'public.is_legacy_barcode(text)', 'public.issue_variant_barcode()', 'public.variant_barcodes_guard()']) f
       where has_function_privilege(r, f, 'EXECUTE') $q$, '');
 select bc_tests.returns('anon cannot execute the scan lookup',
   $q$ select string_agg(f, ', ') from unnest(array['public.admin_scan_lookup(text)', 'public.admin_scan_product(uuid, uuid)']) f
@@ -204,10 +221,15 @@ select bc_tests.returns('barcodes are not part of the storefront tables',
 select bc_tests.returns('every existing size has exactly one barcode',
   $q$ select count(*)::text from public.product_variants v
       where (select count(*) from public.variant_barcodes b where b.variant_id = v.id) <> 1 $q$, '0');
-select bc_tests.returns('every barcode is valid',
-  $q$ select count(*)::text from public.variant_barcodes where not public.is_valid_barcode(barcode) $q$, '0');
+select bc_tests.returns('every size''s barcode is a valid KNS barcode',
+  $q$ select count(*)::text from public.variant_barcodes where variant_id is not null and not public.is_valid_barcode(barcode) $q$, '0');
+select bc_tests.returns('every U barcode is retired, and every barcode is KNS or U',
+  $q$ select count(*)::text from public.variant_barcodes
+      where not (public.is_valid_barcode(barcode) or (public.is_legacy_barcode(barcode) and variant_id is null)) $q$, '0');
+select bc_tests.returns('every serial number is used once, whatever the prefix',
+  $q$ select (count(*) = count(distinct right(barcode, 8)))::text from public.variant_barcodes $q$, 'true');
 select bc_tests.returns('the counter is past every issued barcode',
-  $q$ select (coalesce(max(substr(barcode, 2, 7)::integer), 0) <= (select last_value from public.barcode_serial))::text
+  $q$ select (coalesce(max(left(right(barcode, 8), 7)::integer), 0) <= (select last_value from public.barcode_serial))::text
       from public.variant_barcodes $q$, 'true');
 
 -- ---------------------------------------------------------------------------
@@ -216,17 +238,17 @@ select bc_tests.returns('the counter is past every issued barcode',
 
 set local role anon;
 select bc_tests.throws('anon: cannot read barcodes', $q$ select count(*) from public.variant_barcodes $q$, '42501');
-select bc_tests.throws('anon: cannot look up barcodes', $q$ select public.admin_scan_lookup('U00000013') $q$, '42501');
+select bc_tests.throws('anon: cannot look up barcodes', $q$ select public.admin_scan_lookup('KNS00000013') $q$, '42501');
 reset role;
 
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub": "b1b1b1b1-0000-4000-8000-0000000000b1", "role": "authenticated", "aal": "aal2"}', true);
 select bc_tests.returns('user B (aal2): sees no barcodes', $q$ select count(*)::text from public.variant_barcodes $q$, '0');
-select bc_tests.throws('user B: cannot look up barcodes', $q$ select public.admin_scan_lookup('U00000013') $q$, '42501');
+select bc_tests.throws('user B: cannot look up barcodes', $q$ select public.admin_scan_lookup('KNS00000013') $q$, '42501');
 select bc_tests.returns('user B: the product helper returns nothing',
   $q$ select coalesce(public.admin_scan_product((select id from public.products limit 1), null)::text, 'null') $q$, 'null');
 select bc_tests.throws('user B: cannot add barcodes',
-  $q$ insert into public.variant_barcodes (barcode, sku_at_issue, size_eu) values ('U00000021', 'X', 40) $q$, '42501');
+  $q$ insert into public.variant_barcodes (barcode, sku_at_issue, size_eu) values ('KNS00000021', 'X', 40) $q$, '42501');
 reset role;
 
 -- ---------------------------------------------------------------------------
@@ -243,7 +265,7 @@ select set_config('bc.new',
     '[{"size": 30, "stock": 5}, {"size": 31, "stock": 0}, {"size": 32, "stock": 2}]') ->> 'id', true);
 
 select bc_tests.returns('create: every new size (drafts too) gets a valid barcode',
-  $q$ select count(*) || '/' || count(b.barcode) || '/' || bool_and(coalesce(b.barcode ~ '^U[0-9]{8}$', false))
+  $q$ select count(*) || '/' || count(b.barcode) || '/' || bool_and(coalesce(b.barcode ~ '^KNS[0-9]{8}$', false))
       from public.product_variants v left join public.variant_barcodes b on b.variant_id = v.id
       where v.product_id in (bc_tests.p('pl'), bc_tests.p('new')) $q$, '4/4/true');
 select bc_tests.returns('create: the barcodes are distinct',
@@ -258,14 +280,23 @@ select set_config('bc.code_30', bc_tests.code('new', 30), true);
 select set_config('bc.code_31', bc_tests.code('new', 31), true);
 
 select bc_tests.throws('admin: cannot add a barcode directly',
-  $q$ insert into public.variant_barcodes (barcode, sku_at_issue, size_eu) values ('U00000021', 'X', 40) $q$, '42501');
+  $q$ insert into public.variant_barcodes (barcode, sku_at_issue, size_eu) values ('KNS00000021', 'X', 40) $q$, '42501');
 select bc_tests.throws('admin: cannot change a barcode directly',
-  $q$ update public.variant_barcodes set barcode = 'U00000021' where barcode = current_setting('bc.code_pl') $q$, '42501');
+  $q$ update public.variant_barcodes set barcode = 'KNS00000021' where barcode = current_setting('bc.code_pl') $q$, '42501');
 select bc_tests.throws('admin: cannot delete a barcode directly',
   $q$ delete from public.variant_barcodes where barcode = current_setting('bc.code_pl') $q$, '42501');
-select bc_tests.throws('admin: an item code can''t look like a barcode',
+select bc_tests.throws('admin: an item code can''t look like a KNS barcode',
+  $q$ select public.admin_create_product(bc_tests.fields('KNS00000013', 'test-bc-shaped'), '[{"size": 42, "stock": 1}]') $q$,
+  '23514', 'products_item_code_not_kns_barcode');
+select bc_tests.throws('admin: nor like KN5 + 8 digits (the scan box reads it as KNS)',
+  $q$ select public.admin_create_product(bc_tests.fields('KN500000014', 'test-bc-shaped'), '[{"size": 42, "stock": 1}]') $q$,
+  '23514', 'products_item_code_not_kns_barcode');
+select bc_tests.throws('admin: nor like a retired U barcode',
   $q$ select public.admin_create_product(bc_tests.fields('U00000013', 'test-bc-shaped'), '[{"size": 42, "stock": 1}]') $q$,
   '23514', 'products_item_code_not_barcode');
+select bc_tests.returns('admin: other item codes starting KNS are fine',
+  $q$ select (public.admin_create_product(bc_tests.fields('KNS-0001', 'test-bc-kns-prefix'), '[{"size": 40, "stock": 1}]') ->> 'id' is not null)::text $q$,
+  'true');
 
 -- ---------------------------------------------------------------------------
 -- Barcodes never change, and removed sizes' barcodes are never reused
@@ -273,7 +304,7 @@ select bc_tests.throws('admin: an item code can''t look like a barcode',
 
 select public.admin_save_product(bc_tests.p('new'), bc_tests.v('new'),
   bc_tests.fields('TEST-BC-NEW2', 'test-bc-new', 'new'),
-  '[{"size": 30, "stock": 7}, {"size": 31, "stock": 0}, {"size": 32, "stock": 2}]', '[]');
+  bc_tests.form(bc_tests.p('new'), '[{"size": 30, "stock": 7}, {"size": 31, "stock": 0}, {"size": 32, "stock": 2}]'), '[]');
 select bc_tests.returns('draft edit: new item code, SKUs and stock, same barcodes',
   $q$ select string_agg(v.sku || '=' || v.stock, ',' order by v.size_eu) || ' ' ||
         (bc_tests.code('new', 30) = current_setting('bc.code_30') and bc_tests.code('new', 31) = current_setting('bc.code_31'))
@@ -282,14 +313,14 @@ select bc_tests.returns('draft edit: new item code, SKUs and stock, same barcode
 
 select public.admin_save_product(bc_tests.p('new'), bc_tests.v('new'),
   bc_tests.fields('TEST-BC-NEW2', 'test-bc-new', 'new'),
-  '[{"size": 30, "stock": 7}, {"size": 32, "stock": 2}]', '[]');
+  bc_tests.form(bc_tests.p('new'), '[{"size": 30, "stock": 7}, {"size": 32, "stock": 2}]'), '[]');
 select bc_tests.returns('removed draft size: its barcode is kept, retired (no size)',
   $q$ select (variant_id is null) || ' ' || (product_id = bc_tests.p('new')) || ' ' || sku_at_issue || ' ' || size_eu
       from public.variant_barcodes where barcode = current_setting('bc.code_31') $q$, 'true true TEST-BC-NEW-31 31.0');
 
 select public.admin_save_product(bc_tests.p('new'), bc_tests.v('new'),
   bc_tests.fields('TEST-BC-NEW2', 'test-bc-new', 'new'),
-  '[{"size": 30, "stock": 7}, {"size": 31, "stock": 4}, {"size": 32, "stock": 2}]', '[]');
+  bc_tests.form(bc_tests.p('new'), '[{"size": 30, "stock": 7}, {"size": 31, "stock": 4}, {"size": 32, "stock": 2}]'), '[]');
 select bc_tests.returns('re-added size: gets a new barcode, never the retired one',
   $q$ select (bc_tests.code('new', 31) is not null and bc_tests.code('new', 31) <> current_setting('bc.code_31'))::text $q$, 'true');
 
@@ -305,8 +336,11 @@ select public.admin_set_publication_status(bc_tests.p('pl'), bc_tests.v('pl'), '
 select bc_tests.returns('restored: same barcode',
   $q$ select (bc_tests.code('pl', 42) = current_setting('bc.code_pl'))::text $q$, 'true');
 select public.admin_set_publication_status(bc_tests.p('pl'), bc_tests.v('pl'), 'published');
+-- Since 20261031120000_inventory_ledger.sql admins have no direct write
+-- access to sizes at all; the product functions refuse removing published
+-- sizes (product_management_test.sql).
 select bc_tests.throws('published: sizes still can''t be removed (so neither can their barcodes)',
-  $q$ delete from public.product_variants where product_id = bc_tests.p('pl') $q$, 'PT400', 'variant_locked');
+  $q$ delete from public.product_variants where product_id = bc_tests.p('pl') $q$, '42501');
 
 -- ---------------------------------------------------------------------------
 -- Scan lookup
@@ -325,11 +359,17 @@ select bc_tests.returns('lookup: a barcode finds its size, with price, stock and
 select bc_tests.returns('lookup: lowercase and spaces are ignored',
   $q$ select public.admin_scan_lookup(' ' || lower(substr(current_setting('bc.code_30'), 1, 4)) || ' ' || substr(current_setting('bc.code_30'), 5))
         -> 'product' -> 'units' -> 0 ->> 'barcode' = current_setting('bc.code_30') $q$, 'true');
+select bc_tests.returns('lookup: KN5 typed by hand reads as KNS',
+  $q$ select public.admin_scan_lookup('kn5 ' || substr(current_setting('bc.code_30'), 4))
+        -> 'product' -> 'units' -> 0 ->> 'barcode' = current_setting('bc.code_30') $q$, 'true');
+select bc_tests.returns('lookup: the code it answers for is the corrected one',
+  $q$ select public.admin_scan_lookup('KN5' || substr(current_setting('bc.code_30'), 4)) ->> 'code' = current_setting('bc.code_30') $q$, 'true');
 select bc_tests.returns('lookup: a draft''s size is found, and says it is a draft',
   $q$ select public.admin_scan_lookup(current_setting('bc.code_30')) -> 'product' ->> 'publication_status' $q$, 'draft');
-select bc_tests.returns('lookup: a retired barcode says which size it was',
-  $q$ select r ->> 'kind' || ' ' || (r ->> 'size_eu') || ' ' || (r ->> 'sku') || ' ' || (r -> 'product' ->> 'item_code')
-      from (select public.admin_scan_lookup(current_setting('bc.code_31')) r) x $q$, 'retired 31.0 TEST-BC-NEW-31 TEST-BC-NEW2');
+select bc_tests.returns('lookup: a retired barcode says which size it was, and that size''s barcode now',
+  $q$ select r ->> 'kind' || ' ' || (r ->> 'size_eu') || ' ' || (r ->> 'sku') || ' ' || (r -> 'product' ->> 'item_code') || ' '
+        || (r ->> 'current_barcode' = bc_tests.code('new', 31))
+      from (select public.admin_scan_lookup(current_setting('bc.code_31')) r) x $q$, 'retired 31.0 TEST-BC-NEW-31 TEST-BC-NEW2 true');
 select bc_tests.returns('lookup: an item code lists every size with its barcode',
   $q$ select r ->> 'kind' || ' ' || (r ->> 'matched_by') || ' ' || jsonb_array_length(r -> 'product' -> 'units') || ' '
         || (select bool_and(u ->> 'barcode' is not null) from jsonb_array_elements(r -> 'product' -> 'units') u)
@@ -338,14 +378,15 @@ select bc_tests.returns('lookup: an exact SKU finds that size',
   $q$ select r ->> 'kind' || ' ' || (r ->> 'matched_by') || ' ' || (r -> 'product' -> 'units' -> 0 ->> 'sku')
       from (select public.admin_scan_lookup('TEST-BC-NEW2-32') r) x $q$, 'unit sku TEST-BC-NEW2-32');
 select bc_tests.returns('lookup: an unknown code is not found',
-  $q$ select string_agg(public.admin_scan_lookup(c) ->> 'kind', ',') from unnest(array['U99999992', '4006381333931', '', 'TEST-BC']) c $q$,
-  'not_found,not_found,not_found,not_found');
+  $q$ select string_agg(public.admin_scan_lookup(c) ->> 'kind', ',')
+      from unnest(array['KNS99999992', 'KN599999992', 'U99999992', '4006381333931', '', 'TEST-BC']) c $q$,
+  'not_found,not_found,not_found,not_found,not_found,not_found');
 select bc_tests.returns('lookup: changes nothing (sizes, stock, products, barcodes)',
   $q$ select (bc_tests.fingerprint() = current_setting('bc.before'))::text $q$, 'true');
 
 -- Archived and sold out are reported as they are.
 select public.admin_save_product(bc_tests.p('pl'), bc_tests.v('pl'), bc_tests.fields('TEST-BC-PL', 'test-bc-preloved'),
-  '[{"size": 42, "stock": 0}]', jsonb_build_array(jsonb_build_object('id', bc_tests.p('img'), 'alt', 'Side view')));
+  bc_tests.form(bc_tests.p('pl'), '[{"size": 42, "stock": 0}]'), jsonb_build_array(jsonb_build_object('id', bc_tests.p('img'), 'alt', 'Side view')));
 select public.admin_set_publication_status(bc_tests.p('pl'), bc_tests.v('pl'), 'archived');
 select bc_tests.returns('lookup: archived and out of stock',
   $q$ select (r -> 'product' ->> 'publication_status') || ' ' || (r -> 'product' -> 'units' -> 0 ->> 'stock')
@@ -365,7 +406,7 @@ reset role;
 -- ---------------------------------------------------------------------------
 
 select bc_tests.throws('owner: cannot change a barcode',
-  $q$ update public.variant_barcodes set barcode = 'U00000021' where barcode = current_setting('bc.code_pl') $q$, 'PT400', 'barcode_locked');
+  $q$ update public.variant_barcodes set barcode = 'KNS00000021' where barcode = current_setting('bc.code_pl') $q$, 'PT400', 'barcode_locked');
 select bc_tests.throws('owner: cannot move a barcode to another size',
   $q$ update public.variant_barcodes set variant_id = (select id from public.product_variants where sku = 'TEST-BC-NEW2-32')
       where barcode = current_setting('bc.code_31') $q$, 'PT400', 'barcode_locked');
@@ -377,8 +418,15 @@ select bc_tests.throws('owner: cannot issue a barcode twice',
   $q$ insert into public.variant_barcodes (barcode, sku_at_issue, size_eu) values (current_setting('bc.code_31'), 'X', 40) $q$,
   '23505', 'variant_barcodes_pkey');
 select bc_tests.throws('owner: cannot store an invalid barcode',
-  $q$ insert into public.variant_barcodes (barcode, sku_at_issue, size_eu) values ('U00000014', 'X', 40) $q$,
-  '23514', 'variant_barcodes_barcode_valid');
+  $q$ insert into public.variant_barcodes (barcode, sku_at_issue, size_eu) values ('KNS00000014', 'X', 40) $q$,
+  '23514', 'variant_barcodes_barcode_format');
+select bc_tests.throws('owner: cannot give a size a U barcode (U only exists retired)',
+  $q$ insert into public.variant_barcodes (barcode, variant_id, sku_at_issue, size_eu)
+      values ('U99999992', (select id from public.product_variants where sku = 'TEST-BC-NEW2-32'), 'X', 32) $q$,
+  '23514', 'variant_barcodes_barcode_format');
+select bc_tests.throws('owner: cannot reuse a serial number under the other prefix',
+  $q$ insert into public.variant_barcodes (barcode, sku_at_issue, size_eu) values ('U' || right(current_setting('bc.code_31'), 8), 'X', 40) $q$,
+  '23505', 'variant_barcodes_serial_key');
 
 -- Even with the counter wound back, a new size gets a barcode never issued before.
 select set_config('bc.count_before', (select count(*) from public.variant_barcodes)::text, true);
@@ -389,6 +437,11 @@ select bc_tests.returns('counter wound back: the new size still gets a fresh, un
   $q$ select (select count(*) from public.variant_barcodes)::bigint - current_setting('bc.count_before')::bigint || ' '
         || (select count(*) from public.variant_barcodes b join public.product_variants v on v.id = b.variant_id
             where v.sku = 'TEST-BC-NEW2-33') $q$, '1 1');
+select bc_tests.returns('counter wound back: the new barcode is KNS, and its serial number was never used before',
+  $q$ select public.is_valid_barcode(b.barcode) || ' '
+        || (select count(*) from public.variant_barcodes o where right(o.barcode, 8) = right(b.barcode, 8))
+      from public.variant_barcodes b join public.product_variants v on v.id = b.variant_id
+      where v.sku = 'TEST-BC-NEW2-33' $q$, 'true 1');
 
 -- Put the counter back where it was (sequences ignore the rollback below).
 select setval('public.barcode_serial', current_setting('bc.serial_last')::bigint, current_setting('bc.serial_called')::boolean);

@@ -3,12 +3,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { InfoIcon } from "@/components/icons";
-import { StatusBadge } from "@/components/product/badges";
+import { LightUpBadge, SaleBadge, StatusBadge } from "@/components/product/badges";
 import { ProductGrid } from "@/components/product/product-card";
 import { ProductGallery } from "@/components/product/product-gallery";
+import { ProductPrice } from "@/components/product/product-price";
 import { PurchasePanel } from "@/components/product/purchase-panel";
 import { getAllProducts, getProductBySlug, getRelatedProducts } from "@/lib/catalog/catalog";
 import { CONDITIONS, DEPARTMENTS, STATUS_LABELS, STYLE_LABELS } from "@/lib/catalog/labels";
+import { lightUpDisclosure, showsLightUpBadge } from "@/lib/catalog/light-up";
+import { isOnSale, saleBadgeText } from "@/lib/catalog/pricing";
 import { fullName } from "@/lib/catalog/product-utils";
 import { formatPrice } from "@/lib/format";
 
@@ -29,7 +32,9 @@ export async function generateMetadata({
   if (!product) return { title: "Product not found" };
   return {
     title: fullName(product),
-    description: `${STATUS_LABELS[product.status]} ${product.name} — ${formatPrice(product.price)}. ${product.description}`,
+    description: `${STATUS_LABELS[product.status]} ${product.name} — ${formatPrice(product.price)}${
+      isOnSale(product) ? ` (sale; regular price ${formatPrice(product.regularPrice!)})` : ""
+    }. ${product.description}`,
   };
 }
 
@@ -53,6 +58,7 @@ async function ProductDetails({ params }: Pick<PageProps<"/products/[slug]">, "p
   const related = await getRelatedProducts(product);
   const department = DEPARTMENTS[product.department];
   const condition = CONDITIONS.find((c) => c.value === product.condition)!;
+  const lights = product.lightUp ? lightUpDisclosure(product.lightUp) : null;
 
   return (
     <>
@@ -86,14 +92,21 @@ async function ProductDetails({ params }: Pick<PageProps<"/products/[slug]">, "p
           </h1>
           <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
             <StatusBadge status={product.status} />
+            {showsLightUpBadge(product.lightUp) ? <LightUpBadge /> : null}
             <span>
               <span className="text-muted">Condition: </span>
               <Link href="/condition-guide" className="font-medium link-underline">
                 {condition.label}
               </Link>
             </span>
+            {lights?.warning ? (
+              <span className="font-semibold text-danger">Light-up soles: {lights.short}</span>
+            ) : null}
           </div>
-          <p className="mt-4 text-2xl font-bold">{formatPrice(product.price)}</p>
+          <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <ProductPrice product={product} size="page" />
+            {isOnSale(product) ? <SaleBadge text={saleBadgeText(product.regularPrice!, product.price)} /> : null}
+          </div>
 
           <div className="mt-6 border-t border-line pt-6">
             <PurchasePanel product={product} />
@@ -112,6 +125,17 @@ async function ProductDetails({ params }: Pick<PageProps<"/products/[slug]">, "p
                   <li key={note}>{note}</li>
                 ))}
               </ul>
+            ) : null}
+            {product.lightUp && lights ? (
+              <div className="mt-3 text-sm">
+                <p className={lights.warning ? "font-semibold text-danger" : undefined}>{lights.text}</p>
+                {product.lightUp.activation ? (
+                  <p className="mt-1">
+                    <span className="text-muted">{lights.activationLabel}: </span>
+                    {product.lightUp.activation}
+                  </p>
+                ) : null}
+              </div>
             ) : null}
             <Link href="/condition-guide" className="mt-3 inline-block text-sm font-semibold text-forest link-underline">
               Read the condition guide

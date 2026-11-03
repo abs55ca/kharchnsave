@@ -9,11 +9,14 @@ import {
   uploadProductPhoto,
   type ProductFormState,
 } from "@/app/admin/products/actions";
+import { SaleBadge } from "@/components/product/badges";
+import { ProductPrice } from "@/components/product/product-price";
 import {
   EMPTY_PRODUCT,
   LIMITS,
   PHOTO_UPLOAD,
   PRELOVED_CONDITIONS,
+  rupeesToPaisa,
   STYLES,
   suggestSlug,
   type FieldErrors,
@@ -22,7 +25,12 @@ import {
   type SizeValue,
 } from "@/lib/admin/product-input";
 import type { AdminPhoto, EditableProduct, PublicationStatus } from "@/lib/admin/products";
+import { onServerCopy, productFingerprint } from "@/lib/admin/product-sync";
 import { CONDITION_LABELS, DEPARTMENTS, DEPARTMENT_ORDER, STYLE_LABELS } from "@/lib/catalog/labels";
+import { LIGHT_UP_CONDITIONS, lightUpDisclosure, type LightUpCondition } from "@/lib/catalog/light-up";
+import { saleBadgeText } from "@/lib/catalog/pricing";
+import { labelNameFor } from "@/lib/labels/name-fit";
+import { LabelPreview } from "./label-preview";
 import { PublicationBadge } from "./publication-badge";
 import { useUnsavedChangesWarning } from "./use-unsaved-changes";
 
@@ -36,6 +44,7 @@ const ERROR = "mt-1 text-sm font-medium text-danger";
 
 const FIELD_LABELS: Record<FieldName, string> = {
   name: "Product name",
+  labelName: "Label name",
   brand: "Brand",
   colour: "Colour",
   department: "Department",
@@ -44,7 +53,12 @@ const FIELD_LABELS: Record<FieldName, string> = {
   condition: "Condition",
   conditionNotes: "Condition notes",
   description: "Description",
-  price: "Price",
+  lightUp: "Light-up soles",
+  lightUpCondition: "Do the lights work?",
+  lightUpActivation: "How the lights activate",
+  price: "Regular price",
+  salePrice: "Sale price",
+  autoItemCode: "Item code",
   itemCode: "Item code",
   slug: "Web address name",
   sizes: "Sizes and stock",
@@ -66,6 +80,9 @@ export function ProductEditor({ product, created = false }: { product?: Editable
   const [status, setStatus] = useState<PublicationStatus>(product?.status ?? "draft");
   const [listedAt, setListedAt] = useState(product?.listedAt ?? null);
   const [saved, setSaved] = useState<Saved>({ values: product?.values ?? EMPTY_PRODUCT, photos: product?.photos ?? [] });
+  // The last server copy rendered, and a newer one held back while there are unsaved changes.
+  const [serverSeen, setServerSeen] = useState(product ? productFingerprint(product.version, product.values.sizes) : null);
+  const [newer, setNewer] = useState<EditableProduct | null>(null);
 
   const applyProduct = (next: EditableProduct) => {
     setValues(next.values);
@@ -74,6 +91,7 @@ export function ProductEditor({ product, created = false }: { product?: Editable
     setStatus(next.status);
     setListedAt(next.listedAt);
     setSaved({ values: next.values, photos: next.photos });
+    setNewer(null);
   };
 
   const [state, formAction, saving] = useActionState(async (previous: ProductFormState, formData: FormData) => {
@@ -81,8 +99,27 @@ export function ProductEditor({ product, created = false }: { product?: Editable
     if (result.status === "saved" && result.product) applyProduct(result.product);
     return result;
   }, INITIAL_STATE);
+  // Submitted by hand rather than through <form action>: React resets a form
+  // after its action, which puts controlled <select>s back to the option
+  // they first rendered with while the state keeps the saved value, so the
+  // next save would send the old option.
+  const [, startSubmit] = useTransition();
+  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    startSubmit(() => formAction(formData));
+  };
 
   const dirty = useMemo(() => snapshot({ values, photos }) !== snapshot(saved), [values, photos, saved]);
+
+  // A newer server copy (stock changed by an order, an edit elsewhere): see lib/admin/product-sync.ts.
+  const server = product ? productFingerprint(product.version, product.values.sizes) : null;
+  if (product && server && server !== serverSeen) {
+    setServerSeen(server);
+    const action = onServerCopy({ server, baseline: productFingerprint(version, saved.values.sizes), dirty, saving });
+    if (action === "adopt") applyProduct(product);
+    else setNewer(action === "hold" ? product : null);
+  }
   useUnsavedChangesWarning(dirty);
 
   const errors: FieldErrors = state.errors;
@@ -100,6 +137,13 @@ export function ProductEditor({ product, created = false }: { product?: Editable
     ) : null;
 
   const errorEntries = Object.entries(errors) as [FieldName, string][];
+
+  // The name the labels will print, and a size and barcode to preview it with.
+  const labelName = labelNameFor({ labelName: values.labelName, name: values.name });
+  const previewSize = values.sizes.find((row) => /^\d{2}(\.[05])?$/.test(row.size));
+  const previewBarcode = saved.values.sizes.find((row) => row.barcode)?.barcode ?? null;
+  const kids = values.department === "kids";
+  const salePreview = previewPrices(values.price, values.salePrice);
 
   return (
     <div className="pb-28">
@@ -120,7 +164,7 @@ export function ProductEditor({ product, created = false }: { product?: Editable
         />
       ) : null}
 
-      <form action={formAction} noValidate aria-labelledby={`${id}-title`}>
+      <form onSubmit={submit} noValidate aria-labelledby={`${id}-title`}>
         <h2 id={`${id}-title`} className="sr-only">
           Product details
         </h2>
@@ -128,6 +172,8 @@ export function ProductEditor({ product, created = false }: { product?: Editable
           <>
             <input type="hidden" name="productId" value={product.id} />
             <input type="hidden" name="version" value={version} />
+            <input type="hidden" name="labelNameWas" value={saved.values.labelName} />
+            <input type="hidden" name="itemCodeWas" value={saved.values.itemCode} />
             <input
               type="hidden"
               name="photos"
@@ -135,7 +181,7 @@ export function ProductEditor({ product, created = false }: { product?: Editable
             />
           </>
         ) : null}
-        <input type="hidden" name="sizes" value={JSON.stringify(values.sizes.map(({ size, stock }) => ({ size, stock })))} />
+        <input type="hidden" name="sizes" value={JSON.stringify(values.sizes.map(({ size, stock, stockWas, inventoryVersion }) => ({ size, stock, stockWas, inventoryVersion })))} />
 
         {errorEntries.length > 0 ? (
           <div role="alert" className="mb-6 rounded-md border border-danger/40 bg-danger/5 px-4 py-3 text-sm">
@@ -174,6 +220,39 @@ export function ProductEditor({ product, created = false }: { product?: Editable
                 Model and colour, as shoppers see it, e.g. “Air Max Sneakers — White/Orange”.
               </p>
               {errorText("name")}
+            </div>
+            <div id="label-name" className="grid scroll-mt-24 gap-4 md:col-span-2 md:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]">
+              <div>
+                <label htmlFor={fieldId("labelName")} className={LABEL}>
+                  Label name <span className="font-normal text-muted">(optional, printed labels only)</span>
+                </label>
+                <input
+                  id={fieldId("labelName")}
+                  name="labelName"
+                  value={values.labelName}
+                  onChange={(e) => set("labelName", e.target.value)}
+                  maxLength={LIMITS.labelName}
+                  autoComplete="off"
+                  aria-invalid={errors.labelName || (values.labelName.trim() && labelName.problem) ? true : undefined}
+                  aria-describedby={describedBy("labelName", true)}
+                  className={`${INPUT} h-11`}
+                />
+                <p id={`${fieldId("labelName")}-hint`} className={HINT}>
+                  A short name for the shelf label, e.g. “Navy/Grey Trainers”. The website always shows the full product
+                  name. Left empty, labels use the product name, if it fits on one line. Nothing is added for you: type
+                  “Light-up” here if you want it on the label.
+                  {labelName.problem && labelName.source === "product-name"
+                    ? " You can still save other changes; labels can’t be printed until the name fits."
+                    : null}
+                </p>
+                {errorText("labelName")}
+              </div>
+              <LabelPreview
+                name={labelName}
+                typed={values.labelName.trim() ? values.labelName : values.name}
+                size={previewSize ? Number(previewSize.size) : null}
+                barcode={previewBarcode}
+              />
             </div>
             <div>
               <label htmlFor={fieldId("brand")} className={LABEL}>
@@ -261,6 +340,92 @@ export function ProductEditor({ product, created = false }: { product?: Editable
                 ))}
               </div>
               {errorText("itemStatus")}
+            </fieldset>
+            <fieldset
+              id={fieldId("lightUp")}
+              aria-describedby={`${fieldId("lightUp")}-hint`}
+              className={`rounded-md p-4 md:col-span-2 ${kids ? "border-2 border-lime bg-lime/10" : "border border-line"}`}
+            >
+              <legend className="px-1 text-sm font-semibold">Light-up soles?</legend>
+              <p id={`${fieldId("lightUp")}-hint`} className="text-xs text-muted">
+                {kids
+                  ? "Kids’ shoes: check whether the soles light up, and test both shoes before choosing “Both shoes work”."
+                  : "Only if the soles have lights."}{" "}
+                The shop shows a Light-up badge only when both shoes work.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-sm">
+                {(
+                  [
+                    ["yes", "Yes"],
+                    ["no", "No"],
+                    ["", "Not recorded"],
+                  ] as const
+                ).map(([answer, text]) => (
+                  <label key={answer || "unknown"} className="flex min-h-11 items-center gap-2">
+                    <input
+                      type="radio"
+                      name="lightUp"
+                      value={answer}
+                      checked={values.lightUp === answer}
+                      onChange={() => set("lightUp", answer)}
+                      className="size-4 accent-forest"
+                    />
+                    {text}
+                  </label>
+                ))}
+              </div>
+              {values.lightUp === "" ? (
+                <p className={HINT}>Not recorded yet: the shop says nothing about lights.</p>
+              ) : null}
+              {values.lightUp === "yes" ? (
+                <div className="mt-3 grid gap-4 md:grid-cols-2">
+                  <div>
+                    <label htmlFor={fieldId("lightUpCondition")} className={LABEL}>
+                      Do the lights work?
+                    </label>
+                    <select
+                      id={fieldId("lightUpCondition")}
+                      name="lightUpCondition"
+                      value={values.lightUpCondition}
+                      onChange={(e) => set("lightUpCondition", e.target.value as LightUpCondition)}
+                      aria-invalid={errors.lightUpCondition ? true : undefined}
+                      aria-describedby={describedBy("lightUpCondition", true)}
+                      className={`${INPUT} h-11`}
+                    >
+                      {LIGHT_UP_CONDITIONS.map((c) => (
+                        <option key={c.value} value={c.value}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p id={`${fieldId("lightUpCondition")}-hint`} className={HINT}>
+                      The shop says: “
+                      {lightUpDisclosure({ condition: values.lightUpCondition || "not_checked", activation: null }).text}”
+                    </p>
+                    {errorText("lightUpCondition")}
+                  </div>
+                  <div>
+                    <label htmlFor={fieldId("lightUpActivation")} className={LABEL}>
+                      How the lights activate <span className="font-normal text-muted">(optional)</span>
+                    </label>
+                    <input
+                      id={fieldId("lightUpActivation")}
+                      name="lightUpActivation"
+                      value={values.lightUpActivation}
+                      onChange={(e) => set("lightUpActivation", e.target.value)}
+                      maxLength={LIMITS.lightUpActivation}
+                      placeholder="e.g. Soles flash when walking."
+                      aria-invalid={errors.lightUpActivation ? true : undefined}
+                      aria-describedby={describedBy("lightUpActivation", true)}
+                      className={`${INPUT} h-11`}
+                    />
+                    <p id={`${fieldId("lightUpActivation")}-hint`} className={HINT}>
+                      Only what you’ve seen or the box says. Leave it empty if you’re not sure.
+                    </p>
+                    {errorText("lightUpActivation")}
+                  </div>
+                </div>
+              ) : null}
             </fieldset>
             <fieldset id={fieldId("styles")} className="md:col-span-2" aria-describedby={describedBy("styles", true)}>
               <legend className={LABEL}>Styles</legend>
@@ -364,10 +529,10 @@ export function ProductEditor({ product, created = false }: { product?: Editable
         </Section>
 
         <Section title="Price, codes and sizes">
-          <div className="grid gap-5 md:grid-cols-3">
+          <div className="grid gap-5 md:grid-cols-2">
             <div>
               <label htmlFor={fieldId("price")} className={LABEL}>
-                Price (rupees)
+                Regular price (Rs.)
               </label>
               <div className="flex items-center gap-2">
                 <span aria-hidden="true" className="text-sm text-muted">
@@ -392,27 +557,93 @@ export function ProductEditor({ product, created = false }: { product?: Editable
               {errorText("price")}
             </div>
             <div>
+              <label htmlFor={fieldId("salePrice")} className={LABEL}>
+                Sale price (Rs., optional)
+              </label>
+              <div className="flex items-center gap-2">
+                <span aria-hidden="true" className="text-sm text-muted">
+                  Rs.
+                </span>
+                <input
+                  id={fieldId("salePrice")}
+                  name="salePrice"
+                  inputMode="decimal"
+                  autoComplete="off"
+                  value={values.salePrice}
+                  onChange={(e) => set("salePrice", e.target.value)}
+                  aria-invalid={errors.salePrice || salePreview.problem ? true : undefined}
+                  aria-describedby={describedBy("salePrice", true)}
+                  className={`${INPUT} h-11`}
+                />
+              </div>
+              <p id={`${fieldId("salePrice")}-hint`} className={HINT}>
+                Lower than the regular price. Leave it empty for no sale; clear it to end a sale.
+              </p>
+              {errorText("salePrice")}
+              <div aria-live="polite" className="mt-2 rounded-md bg-cream px-3 py-2 text-sm">
+                {salePreview.problem ? (
+                  <span className="font-medium text-danger">{salePreview.problem}</span>
+                ) : salePreview.prices ? (
+                  <>
+                    <span className="mb-1 block text-xs text-muted">Customers see and pay:</span>
+                    <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <ProductPrice product={salePreview.prices} size="card" />
+                      {salePreview.prices.regularPrice !== null ? (
+                        <SaleBadge text={saleBadgeText(salePreview.prices.regularPrice, salePreview.prices.price)} />
+                      ) : null}
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-muted">Enter the regular price to see what customers pay.</span>
+                )}
+              </div>
+            </div>
+            <div>
               <label htmlFor={fieldId("itemCode")} className={LABEL}>
                 Item code
               </label>
-              <input
-                id={fieldId("itemCode")}
-                name="itemCode"
-                value={values.itemCode}
-                onChange={(e) => set("itemCode", e.target.value.toUpperCase())}
-                readOnly={locked}
-                maxLength={LIMITS.itemCode}
-                autoComplete="off"
-                spellCheck={false}
-                required
-                aria-invalid={errors.itemCode ? true : undefined}
-                aria-describedby={describedBy("itemCode", true)}
-                className={`${INPUT} h-11 font-mono uppercase read-only:bg-cream`}
-              />
+              {isNew ? (
+                <label className="mb-2 flex min-h-11 items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    name="autoItemCode"
+                    checked={values.autoItemCode}
+                    onChange={(e) => set("autoItemCode", e.target.checked)}
+                    className="size-4 accent-forest"
+                  />
+                  Automatically generate item code
+                </label>
+              ) : null}
+              {isNew && values.autoItemCode ? (
+                <p
+                  id={fieldId("itemCode")}
+                  className="flex h-11 items-center rounded-md border border-dashed border-line bg-cream px-3 text-sm text-muted"
+                >
+                  Assigned when saved (e.g. ITEM-000123)
+                </p>
+              ) : (
+                <input
+                  id={fieldId("itemCode")}
+                  name="itemCode"
+                  value={values.itemCode}
+                  onChange={(e) => set("itemCode", e.target.value.toUpperCase())}
+                  readOnly={locked}
+                  maxLength={LIMITS.itemCode}
+                  autoComplete="off"
+                  spellCheck={false}
+                  required
+                  aria-invalid={errors.itemCode ? true : undefined}
+                  aria-describedby={describedBy("itemCode", true)}
+                  className={`${INPUT} h-11 font-mono uppercase read-only:bg-cream`}
+                />
+              )}
               <p id={`${fieldId("itemCode")}-hint`} className={HINT}>
+                The item code identifies the product; each size gets its own SKU (item code + size) and barcode.{" "}
                 {locked
                   ? "Fixed: this product has been published."
-                  : "Shown on the product page, e.g. PL-M-1001. Fixed once published."}
+                  : isNew && values.autoItemCode
+                    ? "Shown on the product page."
+                    : "Shown on the product page, e.g. PL-M-1001. Fixed once published."}
               </p>
               {errorText("itemCode")}
             </div>
@@ -494,6 +725,14 @@ export function ProductEditor({ product, created = false }: { product?: Editable
                     Reload
                   </a>
                 </span>
+              ) : newer ? (
+                <span role="alert" className="font-medium text-danger">
+                  This product changed somewhere else (for example, an order changed its stock), so saving your changes
+                  would be refused.{" "}
+                  <button type="button" onClick={() => applyProduct(newer)} className="font-semibold underline">
+                    Discard my changes and show the latest
+                  </button>
+                </span>
               ) : state.status === "error" && errorEntries.length === 0 ? (
                 <span role="alert" className="font-medium text-danger">
                   {state.message}
@@ -521,6 +760,19 @@ export function ProductEditor({ product, created = false }: { product?: Editable
       </form>
     </div>
   );
+}
+
+/** What customers would see for the typed prices, or why the sale price can't be used. */
+function previewPrices(priceText: string, saleText: string) {
+  const regular = rupeesToPaisa(priceText);
+  const sale = saleText.trim() ? rupeesToPaisa(saleText) : null;
+  if (regular === null) return { prices: null, problem: null };
+  if (saleText.trim() && sale === null) return { prices: null, problem: "The sale price isn’t a valid amount, e.g. 6800." };
+  if (sale !== null && sale <= 0) return { prices: null, problem: "A sale price must be above zero." };
+  if (sale !== null && sale >= regular) {
+    return { prices: null, problem: "The sale price must be lower than the regular price. Lower it, or clear it to end the sale." };
+  }
+  return { prices: { price: (sale ?? regular) / 100, regularPrice: sale === null ? null : regular / 100 }, problem: null };
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -606,7 +858,8 @@ function SizesEditor({
                     id={`${id}-stock-${index}`}
                     value={row.stock === "0" ? "0" : "1"}
                     onChange={(e) => update(index, { stock: e.target.value })}
-                    className={`${INPUT} h-10 w-36`}
+                    disabled={(row.reserved ?? 0) > 0}
+                    className={`${INPUT} h-10 w-36 disabled:bg-cream`}
                   >
                     <option value="1">For sale (1)</option>
                     <option value="0">Sold (0)</option>
@@ -622,6 +875,11 @@ function SizesEditor({
                   />
                 )}
               </div>
+              {(row.reserved ?? 0) > 0 ? (
+                <p className="pb-2.5 text-xs font-semibold text-danger">
+                  {preloved ? "Held for an order" : `+ ${row.reserved} held for orders`}
+                </p>
+              ) : null}
               <p className="pb-2.5 font-mono text-xs text-muted">
                 {sku ? `SKU ${sku}` : null}
                 {!row.sku && sku ? " (new)" : null}

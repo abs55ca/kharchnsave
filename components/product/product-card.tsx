@@ -1,10 +1,12 @@
 import Image from "next/image";
 import Link from "next/link";
 import { CONDITION_LABELS } from "@/lib/catalog/labels";
+import { showsLightUpBadge } from "@/lib/catalog/light-up";
+import { isOnSale, saleBadgeText } from "@/lib/catalog/pricing";
 import { isInStock, productHref, sizeLabel } from "@/lib/catalog/product-utils";
 import type { Product } from "@/lib/catalog/types";
-import { formatPrice } from "@/lib/format";
-import { SoldOutBadge, StatusBadge } from "./badges";
+import { LightUpBadge, SaleBadge, SoldOutBadge, StatusBadge } from "./badges";
+import { ProductPrice } from "./product-price";
 
 export const PRODUCT_GRID_SIZES =
   "(min-width: 1280px) 290px, (min-width: 1024px) 30vw, (min-width: 768px) 33vw, 50vw";
@@ -28,6 +30,8 @@ export function ProductCard({ product }: { product: Product }) {
         />
         <div className="absolute left-2 top-2 flex flex-wrap gap-1">
           <StatusBadge status={product.status} />
+          {isOnSale(product) ? <SaleBadge text={saleBadgeText(product.regularPrice!, product.price)} /> : null}
+          {showsLightUpBadge(product.lightUp) ? <LightUpBadge /> : null}
           {!inStock ? <SoldOutBadge /> : null}
         </div>
       </div>
@@ -49,9 +53,7 @@ export function ProductCard({ product }: { product: Product }) {
           <span aria-hidden="true"> · </span>
           {product.status === "new" ? "Brand new" : CONDITION_LABELS[product.condition]}
         </p>
-        <p className="mt-1 text-[15px] font-semibold text-ink">
-          {formatPrice(product.price)}
-        </p>
+        <ProductPrice product={product} size="card" className="mt-1" />
       </div>
     </article>
   );

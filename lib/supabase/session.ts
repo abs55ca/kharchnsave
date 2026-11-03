@@ -2,7 +2,7 @@ import "server-only";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { connection } from "next/server";
-import { getSupabaseConfig, noStoreFetch, SESSION_COOKIE_OPTIONS } from "./config";
+import { getSupabaseConfig, SESSION_COOKIE_OPTIONS, sessionFetch } from "./config";
 
 /**
  * Session-aware Supabase client for the admin area. It reads the signed-in
@@ -40,6 +40,7 @@ export async function createSessionClient() {
         }
       },
     },
-    global: { fetch: noStoreFetch },
+    // Never cached; Auth calls and reads give up after a timeout (see config.ts).
+    global: { fetch: sessionFetch },
   });
 }

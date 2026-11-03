@@ -390,11 +390,22 @@ select catalogue_tests.returns('RLS is enabled on all three tables',
       where oid in ('public.products'::regclass, 'public.product_variants'::regclass, 'public.product_images'::regclass)
         and relrowsecurity $q$, '3');
 
+-- Since 20261031120000_inventory_ledger.sql, anon reads sizes through a
+-- column grant: the storefront's columns only (not held stock). Since
+-- 20261101120000_label_names_and_light_up.sql, products too (not the label
+-- name; supabase/tests/label_names_light_up_test.sql checks that).
 select catalogue_tests.returns('anon and authenticated can SELECT all three tables',
   $q$ select string_agg(r || ' ' || t, ', ' order by r, t)
       from unnest(array['anon', 'authenticated']) r,
            unnest(array['public.products', 'public.product_variants', 'public.product_images']) t
-      where not has_table_privilege(r, t, 'SELECT') $q$, '');
+      where not (has_table_privilege(r, t, 'SELECT')
+        or (r = 'anon' and t = 'public.product_variants'
+            and has_column_privilege(r, t, 'sku', 'SELECT') and has_column_privilege(r, t, 'stock', 'SELECT')
+            and has_column_privilege(r, t, 'size_eu', 'SELECT'))
+        or (r = 'anon' and t = 'public.products'
+            and has_column_privilege(r, t, 'slug', 'SELECT') and has_column_privilege(r, t, 'name', 'SELECT')
+            and has_column_privilege(r, t, 'price_paisa', 'SELECT')
+            and has_column_privilege(r, t, 'publication_status', 'SELECT'))) $q$, '');
 
 select catalogue_tests.returns('anon has no write privileges at all',
   $q$ select string_agg(t || ' ' || p, ', ' order by t, p)

@@ -1,5 +1,5 @@
 import { ImageResponse } from "next/og";
-import { K_MARK_PATHS, K_MARK_VIEWBOX } from "@/lib/brand/k-mark";
+import { K_MARK } from "@/lib/brand/k-mark";
 import { SITE } from "@/lib/site";
 
 /** Social preview for /links (shared links on WhatsApp, Facebook, Instagram…). */
@@ -8,7 +8,7 @@ export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
 export default function OpenGraphImage() {
-  const { x, y, width, height } = K_MARK_VIEWBOX;
+  const { x, y, width, height } = K_MARK.viewBox;
   return new ImageResponse(
     (
       <div
@@ -35,7 +35,7 @@ export default function OpenGraphImage() {
           }}
         >
           <svg viewBox={`${x} ${y} ${width} ${height}`} width={200} height={(200 * height) / width}>
-            {K_MARK_PATHS.map((path) => (
+            {K_MARK.paths.map((path) => (
               <path key={path.fill} fill={path.fill} d={path.d} />
             ))}
           </svg>

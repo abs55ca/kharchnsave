@@ -5,6 +5,7 @@ import { Suspense } from "react";
 import { AccessNotice } from "@/components/admin/access-notice";
 import { AdminNav } from "@/components/admin/admin-nav";
 import { ProductEditor } from "@/components/admin/product-editor";
+import { RefreshOnReturn } from "@/components/admin/refresh-on-return";
 import { getEditableProduct, type EditableProduct } from "@/lib/admin/products";
 import { getAdminPageClient } from "@/lib/auth/admin";
 import { UUID_PATTERN } from "@/lib/catalog/photos";
@@ -51,6 +52,7 @@ async function EditProduct({ params, searchParams }: PageProps<"/admin/products/
   return (
     <>
       <AdminNav current="products" email={access.email} />
+      <RefreshOnReturn />
       <p className="text-xs font-semibold uppercase tracking-wide text-muted">
         <Link href="/admin/products" className="hover:underline">
           Products
@@ -58,7 +60,7 @@ async function EditProduct({ params, searchParams }: PageProps<"/admin/products/
         / <span className="font-mono normal-case">{product.values.itemCode}</span>
       </p>
       <h1 className="mt-1 mb-6 text-2xl font-extrabold tracking-tight md:text-3xl">{product.values.name}</h1>
-      {/* Keyed by product: re-renders after a save keep the editor's own state. */}
+      {/* Keyed by product: re-renders keep the editor's own state; it decides what to do with a newer copy. */}
       <ProductEditor key={product.id} product={product} created={created === "1"} />
     </>
   );

@@ -2,6 +2,8 @@ import "server-only";
 import { cacheLife, cacheTag } from "next/cache";
 import { getSupabase } from "@/lib/supabase/server";
 import { CONDITIONS, DEPARTMENT_ORDER, STYLE_LABELS } from "./labels";
+import { lightUpFromColumns } from "./light-up";
+import { pricesFromColumns } from "./pricing";
 import { productPhotoSrc } from "./photos";
 import type { Condition, Department, ItemStatus, Product, Style } from "./types";
 
@@ -29,9 +31,12 @@ export class CatalogueUnavailableError extends Error {
   }
 }
 
+// Never label_name: it's for printed labels only, and the publishable key
+// can't read it (20261101120000_label_names_and_light_up.sql).
 const PRODUCT_COLUMNS = `
   id, item_code, slug, name, brand, department, styles, item_status, condition,
-  condition_notes, colour, description, price_paisa, listed_at,
+  condition_notes, colour, description, price_paisa, sale_price_paisa, listed_at,
+  light_up, light_up_condition, light_up_activation,
   product_variants (sku, size_eu, stock),
   product_images (src, storage_path, alt, width, height, sort_order, focus, shows_defect)
 `;
@@ -50,7 +55,11 @@ type ProductRow = {
   colour: string;
   description: string;
   price_paisa: number;
+  sale_price_paisa: number | null;
   listed_at: string | null;
+  light_up: boolean | null;
+  light_up_condition: string | null;
+  light_up_activation: string | null;
   // PostgREST returns numeric columns as JSON numbers; strings are tolerated.
   product_variants: { sku: string; size_eu: number | string; stock: number }[];
   product_images: {
@@ -74,14 +83,13 @@ function oneOf<T extends string>(value: string, allowed: readonly T[], field: st
   throw new CatalogueUnavailableError(`Product "${slug}" has an unknown ${field} "${value}".`);
 }
 
-/** The only place paisa becomes rupees (850000 → 8500). */
-function paisaToRupees(paisa: number) {
-  return paisa / 100;
-}
-
 function toProduct(row: ProductRow): Product {
   if (!row.listed_at) {
     throw new CatalogueUnavailableError(`Published product "${row.slug}" has no listing date.`);
+  }
+  const lightUp = lightUpFromColumns(row);
+  if (lightUp === undefined) {
+    throw new CatalogueUnavailableError(`Product "${row.slug}" has an unknown light-up condition "${row.light_up_condition}".`);
   }
   return {
     id: row.id,
@@ -95,8 +103,10 @@ function toProduct(row: ProductRow): Product {
     condition: oneOf<Condition>(row.condition, CONDITION_VALUES, "condition", row.slug),
     conditionNotes: row.condition_notes,
     colour: row.colour,
-    price: paisaToRupees(row.price_paisa),
+    // Paisa become rupees only here: what a shopper pays now, and the regular price while on sale.
+    ...pricesFromColumns(row),
     description: row.description,
+    lightUp,
     images: [...row.product_images]
       .sort((a, b) => a.sort_order - b.sort_order)
       .map((image) => ({

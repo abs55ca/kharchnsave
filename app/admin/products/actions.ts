@@ -126,7 +126,15 @@ export async function saveProduct(_previous: ProductFormState, formData: FormDat
   if (!productId || version === null) return failed("This form is out of date. Reload the page.");
 
   const values = readProductForm(formData);
-  const checked = validateProduct(values);
+  // The label name the form loaded: if it's unchanged, a name too wide for
+  // the label doesn't block saving other changes (printing is refused instead).
+  const savedLabelName = formData.get("labelNameWas");
+  // The item code the form loaded: a product may keep its own automatic code.
+  const savedItemCode = formData.get("itemCodeWas");
+  const checked = validateProduct(values, {
+    savedLabelName: typeof savedLabelName === "string" ? savedLabelName : "",
+    savedItemCode: typeof savedItemCode === "string" ? savedItemCode : "",
+  });
   const errors: FieldErrors = checked.ok ? {} : { ...checked.errors };
 
   // Photos to keep, in order, with their details.

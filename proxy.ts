@@ -1,7 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { ADMIN_LOGIN } from "@/lib/auth/safe-redirect";
-import { getSupabaseConfig, noStoreFetch, SESSION_COOKIE_OPTIONS } from "@/lib/supabase/config";
+import { getSupabaseConfig, SESSION_COOKIE_OPTIONS, sessionFetch } from "@/lib/supabase/config";
 
 /*
  * Runs before /admin routes only (see `matcher`), so storefront pages stay
@@ -55,7 +55,8 @@ export async function proxy(request: NextRequest) {
           for (const [header, value] of Object.entries(headers)) response.headers.set(header, value);
         },
       },
-      global: { fetch: noStoreFetch },
+      // A stalled refresh gives up (timeout) instead of holding the response.
+      global: { fetch: sessionFetch },
     });
     // Refreshes the session if the access token is expiring. Keep this
     // directly after createServerClient, before anything else reads it.

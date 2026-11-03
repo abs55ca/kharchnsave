@@ -110,6 +110,18 @@ create function pm_tests.v(key text) returns integer language sql as $$
   select p.version from public.products p where p.id = pm_tests.p(key);
 $$;
 
+-- Sizes as the admin form sends them when it was opened just now: each
+-- existing size carries the stock and inventory version the form loaded
+-- (20261031120000_inventory_ledger.sql). Read with the caller's own access.
+create function pm_tests.form(product uuid, sizes jsonb) returns jsonb language sql as $$
+  select coalesce(jsonb_agg(
+    case when v.id is null then s
+         else s || jsonb_build_object('stock_was', v.stock, 'inventory_version', v.inventory_version) end
+    order by n), '[]'::jsonb)
+  from jsonb_array_elements(sizes) with ordinality as x (s, n)
+  left join public.product_variants v on v.product_id = product and v.size_eu = (s ->> 'size')::numeric;
+$$;
+
 grant usage on schema pm_tests to anon, authenticated;
 grant execute on all functions in schema pm_tests to anon, authenticated;
 
@@ -269,18 +281,18 @@ select pm_tests.returns('kids: several sizes with their own stock',
   'TEST-PM-K-19=3,TEST-PM-K-20=0,TEST-PM-K-21.5=12');
 select pm_tests.throws('kids: negative stock is refused',
   $q$ select public.admin_save_product(pm_tests.p('kids'), pm_tests.v('kids'), pm_tests.fields('TEST-PM-K', 'test-pm-kids', 'new', 250000),
-        '[{"size": 19, "stock": -1}]', '[]') $q$, '23514', 'product_variants_stock_not_negative');
+        pm_tests.form(pm_tests.p('kids'), '[{"size": 19, "stock": -1}]'), '[]') $q$, '23514', 'product_variants_stock_not_negative');
 select pm_tests.throws('kids: can''t become pre-loved while it has several sizes',
   $q$ select public.admin_save_product(pm_tests.p('kids'), pm_tests.v('kids'), pm_tests.fields('TEST-PM-K', 'test-pm-kids', 'preloved', 250000),
-        '[{"size": 19, "stock": 1}, {"size": 20, "stock": 0}]', '[]') $q$, '23505', 'product_variants_one_per_preloved_product');
+        pm_tests.form(pm_tests.p('kids'), '[{"size": 19, "stock": 1}, {"size": 20, "stock": 0}]'), '[]') $q$, '23505', 'product_variants_one_per_preloved_product');
 select public.admin_save_product(pm_tests.p('kids'), pm_tests.v('kids'), pm_tests.fields('TEST-PM-KX', 'test-pm-kids', 'new', 250000),
-  '[{"size": 19, "stock": 4}, {"size": 22, "stock": 1}]', '[]');
+  pm_tests.form(pm_tests.p('kids'), '[{"size": 19, "stock": 4}, {"size": 22, "stock": 1}]'), '[]');
 select pm_tests.returns('kids: a never-published draft can change its item code and sizes; SKUs follow',
   $q$ select string_agg(sku || '=' || stock, ',' order by size_eu) from public.product_variants where product_id = pm_tests.p('kids') $q$,
   'TEST-PM-KX-19=4,TEST-PM-KX-22=1');
 select pm_tests.returns('kids: changing it into a single pre-loved pair works when it has one size',
   $q$ select (public.admin_save_product(pm_tests.p('kids'), pm_tests.v('kids'), pm_tests.fields('TEST-PM-KX', 'test-pm-kids', 'preloved', 250000),
-        '[{"size": 19, "stock": 1}]', '[]') ->> 'version') $q$, '3');
+        pm_tests.form(pm_tests.p('kids'), '[{"size": 19, "stock": 1}]'), '[]') ->> 'version') $q$, '3');
 
 -- Photos (the Storage object itself is uploaded through the Storage API first)
 select pm_tests.throws('photos: the object must be in the product''s own folder',
@@ -306,7 +318,7 @@ select pm_tests.throws('photos: recording an upload against an old version is a 
 select public.admin_add_product_image(pm_tests.p('pl'), 2, pm_tests.p('img2'),
   pm_tests.p('pl') || '/' || pm_tests.p('img2') || '.webp', 1200, 900, 'Sole close-up');
 select public.admin_save_product(pm_tests.p('pl'), pm_tests.v('pl'), pm_tests.fields('TEST-PM-PL', 'test-pm-preloved'),
-  '[{"size": 42.5, "stock": 1}]',
+  pm_tests.form(pm_tests.p('pl'), '[{"size": 42.5, "stock": 1}]'),
   jsonb_build_array(
     jsonb_build_object('id', pm_tests.p('img2'), 'alt', 'Scuff on the sole', 'shows_defect', true),
     jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view', 'shows_defect', false)));
@@ -316,7 +328,7 @@ select pm_tests.returns('photos: saving reorders them and marks defect photos',
   'Scuff on the sole:0:true,Side view:1:false');
 select pm_tests.throws('photos: a photo of another product can''t be named in a save',
   $q$ select public.admin_save_product(pm_tests.p('kids'), pm_tests.v('kids'), pm_tests.fields('TEST-PM-KX', 'test-pm-kids', 'preloved', 250000),
-        '[{"size": 19, "stock": 1}]', jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'x'))) $q$,
+        pm_tests.form(pm_tests.p('kids'), '[{"size": 19, "stock": 1}]'), jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'x'))) $q$,
   'PT409', 'photos_changed');
 
 -- Publishing rules
@@ -324,14 +336,14 @@ select pm_tests.throws('publish: a product without photos can''t be published',
   $q$ select public.admin_set_publication_status(pm_tests.p('kids'), pm_tests.v('kids'), 'published') $q$,
   '23514', 'products_published_needs_photo');
 select public.admin_save_product(pm_tests.p('pl'), pm_tests.v('pl'), pm_tests.fields('TEST-PM-PL', 'test-pm-preloved', 'preloved', 0),
-  '[{"size": 42.5, "stock": 1}]',
+  pm_tests.form(pm_tests.p('pl'), '[{"size": 42.5, "stock": 1}]'),
   jsonb_build_array(jsonb_build_object('id', pm_tests.p('img2'), 'alt', 'Scuff on the sole', 'shows_defect', true),
                     jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view')));
 select pm_tests.throws('publish: the price must be positive',
   $q$ select public.admin_set_publication_status(pm_tests.p('pl'), pm_tests.v('pl'), 'published') $q$,
   '23514', 'products_published_price_positive');
 select public.admin_save_product(pm_tests.p('pl'), pm_tests.v('pl'), pm_tests.fields('TEST-PM-PL', 'test-pm-preloved'),
-  '[{"size": 42.5, "stock": 1}]',
+  pm_tests.form(pm_tests.p('pl'), '[{"size": 42.5, "stock": 1}]'),
   jsonb_build_array(jsonb_build_object('id', pm_tests.p('img2'), 'alt', 'Scuff on the sole', 'shows_defect', true),
                     jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view')));
 select pm_tests.throws('publish: an old version is a conflict',
@@ -343,21 +355,22 @@ select pm_tests.returns('publish: it is published with today''s listing date',
 -- Stable identifiers once published
 select pm_tests.throws('published: the item code is locked',
   $q$ select public.admin_save_product(pm_tests.p('pl'), pm_tests.v('pl'), pm_tests.fields('TEST-PM-PL2', 'test-pm-preloved'),
-        '[{"size": 42.5, "stock": 1}]', jsonb_build_array(jsonb_build_object('id', pm_tests.p('img2'), 'alt', 'a'), jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'b'))) $q$,
+        pm_tests.form(pm_tests.p('pl'), '[{"size": 42.5, "stock": 1}]'), jsonb_build_array(jsonb_build_object('id', pm_tests.p('img2'), 'alt', 'a'), jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'b'))) $q$,
   'PT400', 'item_code_locked');
 select pm_tests.throws('published: sizes can''t be removed (SKUs are never reused)',
   $q$ select public.admin_save_product(pm_tests.p('pl'), pm_tests.v('pl'), pm_tests.fields('TEST-PM-PL', 'test-pm-preloved'),
-        '[{"size": 43, "stock": 1}]', jsonb_build_array(jsonb_build_object('id', pm_tests.p('img2'), 'alt', 'a'), jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'b'))) $q$,
+        pm_tests.form(pm_tests.p('pl'), '[{"size": 43, "stock": 1}]'), jsonb_build_array(jsonb_build_object('id', pm_tests.p('img2'), 'alt', 'a'), jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'b'))) $q$,
   'PT400', 'variant_locked');
 select pm_tests.throws('published: the last photo can''t be removed',
   $q$ select public.admin_save_product(pm_tests.p('pl'), pm_tests.v('pl'), pm_tests.fields('TEST-PM-PL', 'test-pm-preloved'),
-        '[{"size": 42.5, "stock": 1}]', '[]') $q$,
+        pm_tests.form(pm_tests.p('pl'), '[{"size": 42.5, "stock": 1}]'), '[]') $q$,
   '23514', 'products_published_needs_photo');
+-- Admins have no direct write access to sizes (20261031120000_inventory_ledger.sql).
 select pm_tests.throws('published: an SKU can''t be edited directly',
-  $q$ update public.product_variants set sku = 'TEST-OTHER-1' where product_id = pm_tests.p('pl') $q$, 'PT400', 'sku_locked');
+  $q$ update public.product_variants set sku = 'TEST-OTHER-1' where product_id = pm_tests.p('pl') $q$, '42501');
 select pm_tests.returns('published: removing one photo returns its Storage path for clean-up',
   $q$ select public.admin_save_product(pm_tests.p('pl'), pm_tests.v('pl'), pm_tests.fields('TEST-PM-PL', 'test-pm-preloved'),
-        '[{"size": 42.5, "stock": 0}]', jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view'))) -> 'removed_paths' ->> 0 $q$,
+        pm_tests.form(pm_tests.p('pl'), '[{"size": 42.5, "stock": 0}]'), jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view'))) -> 'removed_paths' ->> 0 $q$,
   pm_tests.p('pl') || '/' || pm_tests.p('img2') || '.webp');
 select pm_tests.returns('published: zero stock is allowed (sold out) and it stays published',
   $q$ select publication_status || ' ' || (select stock from public.product_variants where product_id = pm_tests.p('pl'))
@@ -383,11 +396,11 @@ set local role authenticated;
 select set_config('request.jwt.claims', '{"sub": "c0c0c0c0-0000-4000-8000-00000000000c", "role": "authenticated", "aal": "aal2"}', true);
 select set_config('pm.opened', pm_tests.v('pl')::text, true);
 select public.admin_save_product(pm_tests.p('pl'), current_setting('pm.opened')::integer, pm_tests.fields('TEST-PM-PL', 'test-pm-preloved', 'preloved', 450000),
-  '[{"size": 42.5, "stock": 1}]', jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view')));
+  pm_tests.form(pm_tests.p('pl'), '[{"size": 42.5, "stock": 1}]'), jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view')));
 select set_config('request.jwt.claims', '{"sub": "a0a0a0a0-0000-4000-8000-00000000000a", "role": "authenticated", "aal": "aal2"}', true);
 select pm_tests.throws('conflict: the second save of the same version is refused',
   $q$ select public.admin_save_product(pm_tests.p('pl'), current_setting('pm.opened')::integer, pm_tests.fields('TEST-PM-PL', 'test-pm-preloved', 'preloved', 400000),
-        '[{"size": 42.5, "stock": 1}]', jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view'))) $q$,
+        pm_tests.form(pm_tests.p('pl'), '[{"size": 42.5, "stock": 1}]'), jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view'))) $q$,
   'PT409', 'version_conflict');
 select pm_tests.returns('conflict: the first save is kept',
   $q$ select price_paisa::text from public.products where id = pm_tests.p('pl') $q$, '450000');
@@ -405,7 +418,7 @@ set local role authenticated;
 select set_config('request.jwt.claims', '{"sub": "a0a0a0a0-0000-4000-8000-00000000000a", "role": "authenticated", "aal": "aal2"}', true);
 select pm_tests.throws('unpublished: the item code stays locked (it was published once)',
   $q$ select public.admin_save_product(pm_tests.p('pl'), pm_tests.v('pl'), pm_tests.fields('TEST-PM-PL2', 'test-pm-preloved'),
-        '[{"size": 42.5, "stock": 1}]', jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view'))) $q$,
+        pm_tests.form(pm_tests.p('pl'), '[{"size": 42.5, "stock": 1}]'), jsonb_build_array(jsonb_build_object('id', pm_tests.p('img1'), 'alt', 'Side view'))) $q$,
   'PT400', 'item_code_locked');
 select public.admin_set_publication_status(pm_tests.p('pl'), pm_tests.v('pl'), 'archived');
 select pm_tests.throws('archived: can''t go straight back to published',

@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { AccessNotice } from "@/components/admin/access-notice";
 import { AdminNav } from "@/components/admin/admin-nav";
 import { PUBLICATION_LABELS, PublicationBadge } from "@/components/admin/publication-badge";
+import { RefreshOnReturn } from "@/components/admin/refresh-on-return";
 import { paisaToRupeesText } from "@/lib/admin/product-input";
 import {
   cleanSearch,
@@ -69,6 +70,7 @@ async function ProductList({ searchParams }: Pick<PageProps<"/admin/products">, 
   return (
     <>
       <AdminNav current="products" email={access.email} />
+      <RefreshOnReturn />
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-extrabold tracking-tight md:text-3xl">Products</h1>
@@ -156,12 +158,22 @@ async function ProductList({ searchParams }: Pick<PageProps<"/admin/products">, 
                   {item.itemStatus === "preloved" ? "Pre-loved" : "New"} · {pluralize(item.sizeCount, "size")} ·{" "}
                   {item.totalStock > 0 ? `${item.totalStock} in stock` : "sold out"} · {pluralize(item.photoCount, "photo")}
                 </p>
+                {item.labelProblem ? (
+                  <p className="text-xs font-semibold text-danger" title={item.labelProblem}>
+                    Needs a shorter label name before printing
+                  </p>
+                ) : null}
               </div>
               <div className="flex flex-col items-end gap-1 text-right">
                 <PublicationBadge status={item.status} />
-                <span className="text-sm font-semibold" title={`Rs. ${paisaToRupeesText(item.pricePaisa)}`}>
-                  {formatPrice(item.pricePaisa / 100)}
+                <span className="text-sm font-semibold" title={`Rs. ${paisaToRupeesText(item.salePricePaisa ?? item.pricePaisa)}`}>
+                  {formatPrice((item.salePricePaisa ?? item.pricePaisa) / 100)}
                 </span>
+                {item.salePricePaisa !== null ? (
+                  <span className="text-xs text-muted">
+                    Sale; regular <s className="decoration-danger">{formatPrice(item.pricePaisa / 100)}</s>
+                  </span>
+                ) : null}
               </div>
             </li>
           ))}

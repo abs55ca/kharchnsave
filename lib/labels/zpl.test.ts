@@ -1,49 +1,52 @@
 import { describe, expect, it } from "vitest";
 import { formatBarcode } from "@/lib/barcodes/code";
+import { labelNameFor, NAME_MAX_DOTS } from "./name-fit";
 import {
   buildLabel,
   buildLabels,
+  CALIBRATION_NAMES,
   calibrationLabels,
-  chooseLabelName,
   defaultQuantity,
+  fieldData,
   LABEL,
-  LABEL_NAME_MAX,
   labelSize,
-  labelText,
   MAX_BARCODE_CHARS,
   MAX_SYMBOL_DOTS,
   parseQuantity,
   planCode128,
-  shortLabelName,
   worstCaseCode128Dots,
 } from "./zpl";
 
-const SPEC = { name: "Nike Air Max", size: 42.5, barcode: "U00000013", quantity: 1 };
+const SPEC = { name: "Nike Air Max", size: 42.5, barcode: "KNS00000013", quantity: 1 };
 
 /** The ^FO x position of the barcode field. */
 const barcodeX = (zpl: string) => Number(/\^FO(\d+),\d+\^BC/.exec(zpl)?.[1]);
 
 describe("barcode width", () => {
-  it("encodes our barcodes as Code B + Code C pairs: 101 modules, 202 dots", () => {
-    expect(planCode128("U00000013")).toEqual({ field: ">:U>500000013", modules: 101, dots: 202 });
+  it("encodes our barcodes as Code B + Code C pairs: 123 modules, 246 dots", () => {
+    expect(planCode128("KNS00000013")).toEqual({ field: ">:KNS>500000013", modules: 123, dots: 246 });
+  });
+
+  it("uses the fewest symbols possible: 3 letters, 1 switch, 4 digit pairs", () => {
+    expect(planCode128("KNS00000013").modules).toBe(35 + 11 * (3 + 1 + 4));
   });
 
   it("fits inside the label with quiet zones and position tolerance", () => {
     const quiet = LABEL.quietZoneModules * LABEL.moduleDots;
     expect(MAX_SYMBOL_DOTS).toBe(406 - 2 * (20 + 8));
-    for (const barcode of ["U00000013", formatBarcode(9_999_999)]) {
+    for (const barcode of ["KNS00000013", formatBarcode(9_999_999)]) {
       const zpl = buildLabel({ ...SPEC, barcode });
       const x = barcodeX(zpl);
       const width = planCode128(barcode).dots;
       expect(x, "left white").toBeGreaterThanOrEqual(quiet + LABEL.edgeToleranceDots);
       expect(LABEL.widthDots - x - width, "right white").toBeGreaterThanOrEqual(quiet + LABEL.edgeToleranceDots);
-      expect(x).toBe(102);
+      expect(x).toBe(80);
     }
   });
 
   it("still fits if the printer used Code B for every character", () => {
-    expect(worstCaseCode128Dots("U00000013".length)).toBe(268);
-    expect(worstCaseCode128Dots("U00000013".length)).toBeLessThanOrEqual(MAX_SYMBOL_DOTS);
+    expect(worstCaseCode128Dots("KNS00000013".length)).toBe(312);
+    expect(worstCaseCode128Dots("KNS00000013".length)).toBeLessThanOrEqual(MAX_SYMBOL_DOTS);
   });
 
   it("allows at most 12 characters (worst case), and refuses 13", () => {
@@ -60,7 +63,7 @@ describe("barcode width", () => {
   });
 
   it("refuses characters that could break the ZPL", () => {
-    for (const data of ["U0^XZ", "U0~JA", "U0>5", "u00000013", "U 0"]) expect(() => planCode128(data), data).toThrow();
+    for (const data of ["KNS0^XZ", "KNS0~JA", "KNS0>5", "kns00000013", "KNS 0"]) expect(() => planCode128(data), data).toThrow();
   });
 });
 
@@ -75,8 +78,8 @@ describe("label format", () => {
   it("uses the positions that printed correctly on the ZD888", () => {
     expect(zpl).toContain("^FO28,14^A0N,26,26^FB228,1,0,L^FDNike Air Max^FS");
     expect(zpl).toContain("^FO266,14^A0N,26,26^FB112,1,0,R^FDEU 42.5^FS");
-    expect(zpl).toContain("^BY2\n^FO102,46^BCN,88,N,N,N,N^FD>:U>500000013^FS");
-    expect(zpl).toContain("^FO0,145^A0N,30,30^FB406,1,0,C^FDU00000013^FS");
+    expect(zpl).toContain("^BY2\n^FO80,46^BCN,88,N,N,N,N^FD>:KNS>500000013^FS");
+    expect(zpl).toContain("^FO0,145^A0N,30,30^FB406,1,0,C^FDKNS00000013^FS");
   });
 
   // [x, width] of the name's (left-justified) and size's (right-justified) text boxes.
@@ -119,13 +122,15 @@ describe("label format", () => {
 
   it("refuses bad quantities and barcodes", () => {
     for (const quantity of [0, -1, 101, 1.5]) expect(() => buildLabel({ ...SPEC, quantity })).toThrow();
-    expect(() => buildLabel({ ...SPEC, barcode: "U00000014" })).toThrow();
+    expect(() => buildLabel({ ...SPEC, barcode: "KNS00000014" })).toThrow();
+    // Retired U barcodes are never printed again.
+    expect(() => buildLabel({ ...SPEC, barcode: "U00000013" })).toThrow();
   });
 
   it("puts several sizes in one file, one format each", () => {
     const file = buildLabels([
-      { ...SPEC, size: 30, barcode: "U00000021", quantity: 5 },
-      { ...SPEC, size: 31, barcode: "U00000149", quantity: 2 },
+      { ...SPEC, size: 30, barcode: "KNS00000021", quantity: 5 },
+      { ...SPEC, size: 31, barcode: "KNS00000149", quantity: 2 },
     ]);
     expect(file.match(/\^XA/g)).toHaveLength(2);
     expect(file.match(/\^XZ/g)).toHaveLength(2);
@@ -135,42 +140,53 @@ describe("label format", () => {
     expect(() => buildLabels([])).toThrow();
   });
 
-  it("cannot be broken by a product name", () => {
-    const evil = buildLabel({ ...SPEC, name: "Shoe^XZ^XA~JA\\&^FDx" });
+  it("cannot be broken by a label name: ZPL command characters are sent as hex escapes", () => {
+    const evil = buildLabel({ ...SPEC, name: "S^XZ^XA~JA\\_^FD" });
     expect(evil.match(/\^XA/g)).toHaveLength(1);
     expect(evil.match(/\^XZ/g)).toHaveLength(1);
     expect(evil).not.toContain("~");
     expect(evil).not.toContain("\\");
+    expect(evil).toContain("^FB228,1,0,L^FH_^FDS_5EXZ_5EXA_7EJA_5C_5F_5EFD^FS");
+  });
+
+  it("sends ordinary names exactly as before (no ^FH)", () => {
+    expect(fieldData("Nike Air Max")).toBe("^FDNike Air Max");
+    expect(fieldData("Kids' Navy/Grey")).toBe("^FDKids' Navy/Grey");
+    expect(fieldData("Café Crème")).toBe("^FDCafé Crème");
+    expect(fieldData("a_b")).toBe("^FH_^FDa_5Fb");
+  });
+
+  it("prints a name as the check says it prints: curly quotes and dashes made plain", () => {
+    expect(buildLabel({ ...SPEC, name: "Kids’ Trainers – Navy" })).toContain("^FDKids' Trainers - Navy^FS");
+  });
+
+  it("refuses a name that doesn't fit, or that the printer can't print, instead of cutting it", () => {
+    expect(() => buildLabel({ ...SPEC, name: "Navy/Grey Strap Trainers" })).toThrow(/Too wide/);
+    expect(() => buildLabel({ ...SPEC, name: "W".repeat(12) })).toThrow(/Too wide/);
+    expect(() => buildLabel({ ...SPEC, name: "Shoe 👟" })).toThrow(/can’t print “👟”/);
+    expect(() => buildLabel({ ...SPEC, name: "Shoe\u0007" })).toThrow(/U\+0007/);
+    expect(() => buildLabel({ ...SPEC, name: "   " })).toThrow(/no name/);
   });
 });
 
-describe("short names", () => {
-  it("keeps names that fit", () => {
-    expect(shortLabelName("Nike", "Air Max 90")).toBe("Nike Air Max 90");
-    expect(shortLabelName("Unbranded", "Canvas sneakers")).toBe("Canvas sneakers");
+describe("printing and reprinting", () => {
+  const nameField = (zpl: string) => zpl.split("\n").filter((line) => line.startsWith("^FO28,14"));
+
+  it("prints the same name on an all-sizes print and on a single-size reprint", () => {
+    const name = labelNameFor({ labelName: null, name: "Kids’ Trainers" }).text;
+    const all = buildLabels([
+      { name, size: 30, barcode: "KNS00000021", quantity: 4 },
+      { name, size: 31, barcode: "KNS00000149", quantity: 2 },
+    ]);
+    const reprint = buildLabels([{ name, size: 31, barcode: "KNS00000149", quantity: 1 }]);
+    expect(nameField(reprint)).toEqual(["^FO28,14^A0N,26,26^FB228,1,0,L^FDKids' Trainers^FS"]);
+    expect(nameField(all)).toEqual([nameField(reprint)[0], nameField(reprint)[0]]);
   });
 
-  it(`cuts at a whole word to at most ${LABEL_NAME_MAX} characters`, () => {
-    expect(shortLabelName("New Balance", "Fresh Foam X 1080v12")).toBe("New Balance Fresh");
-    const exact = "Abcdefghi Klmnopqr"; // 18
-    expect(shortLabelName("Unbranded", exact)).toBe(exact);
-    expect(shortLabelName("Unbranded", `${exact} x`)).toBe(exact);
-  });
-
-  it("cuts a single long word", () => {
-    expect(shortLabelName("Superlongbrandnamewithoutspaces", "X")).toBe("Superlongbrandname");
-  });
-
-  it("tidies whitespace and keeps accented letters the font has", () => {
-    expect(shortLabelName("  Clarks ", " Désert   Boot ")).toBe("Clarks Désert Boot");
-    expect(labelText("Shoe 👟 one")).toBe("Shoe one");
-  });
-
-  it("lets an admin choose a name for one print, within the limit", () => {
-    expect(chooseLabelName("  Kids canvas  ", "Default")).toBe("Kids canvas");
-    expect(chooseLabelName("", "Default")).toBe("Default");
-    expect(chooseLabelName(null, "Default")).toBe("Default");
-    expect(chooseLabelName("A".repeat(30), "Default")).toHaveLength(LABEL_NAME_MAX);
+  it("uses the label name once there is one", () => {
+    const name = labelNameFor({ labelName: "Navy/Grey Trainers", name: "Kids’ Navy and Grey Double-Strap Sports Trainers" });
+    expect(name).toMatchObject({ source: "label-name", text: "Navy/Grey Trainers", fits: true, problem: null });
+    expect(nameField(buildLabel({ ...SPEC, name: name.text }))).toEqual(["^FO28,14^A0N,26,26^FB228,1,0,L^FDNavy/Grey Trainers^FS"]);
   });
 });
 
@@ -201,21 +217,34 @@ describe("sizes and quantities", () => {
 describe("calibration labels", () => {
   const file = calibrationLabels();
 
-  it("has three labels, each printed once, with a comment saying what it tests", () => {
-    expect(file.match(/\^XA/g)).toHaveLength(3);
-    expect(file.match(/\^PQ1,0,1,N/g)).toHaveLength(3);
-    expect(file.match(/\^FX Calibration [123]/g)).toHaveLength(3);
+  it("has four labels, each printed once, with a comment saying what it tests", () => {
+    expect(file.match(/\^XA/g)).toHaveLength(4);
+    expect(file.match(/\^PQ1,0,1,N/g)).toHaveLength(4);
+    expect(file.match(/\^FX Calibration [1234]/g)).toHaveLength(4);
   });
 
-  it("tests the widest name, the verified 18-character name and the text block command", () => {
-    expect(file).toContain(`^FD${"W".repeat(LABEL_NAME_MAX)}^FS`);
-    expect("New Balance 574 Wh").toHaveLength(LABEL_NAME_MAX);
+  it("prints names at (or close to) the width limit, which the check accepts", () => {
+    const names = CALIBRATION_NAMES.map((name) => labelNameFor({ labelName: name, name: "" }));
+    for (const name of names) expect(name.fits, name.text).toBe(true);
+    expect(names.map((name) => name.widthDots)).toEqual([222, 213, 220, NAME_MAX_DOTS]);
+    // One more of the widest or the narrowest character no longer fits.
+    expect(labelNameFor({ labelName: "W".repeat(12), name: "" }).fits).toBe(false);
+    expect(labelNameFor({ labelName: "l".repeat(38), name: "" }).fits).toBe(false);
+  });
+
+  it("includes the reference name that printed on one line before", () => {
     expect(file).toContain("^FO28,14^A0N,26,26^FB228,1,0,L^FDNew Balance 574 Wh^FS");
-    expect(file).toContain("^FO28,14^A0N,26,26^TBN,228,30^FD");
+    expect(file).toContain("^FDÉcru Navy Trainers 31^FS");
   });
 
   it("uses the same layout as real labels", () => {
-    expect(file.match(/\^FO266,14\^A0N,26,26\^FB112,1,0,R\^FDEU 42\.5\^FS/g)).toHaveLength(3);
-    expect(file.match(/\^FO102,46\^BCN,88,N,N,N,N/g)).toHaveLength(3);
+    expect(file.match(/\^FO266,14\^A0N,26,26\^FB112,1,0,R\^FDEU 42\.5\^FS/g)).toHaveLength(4);
+    expect(file.match(/\^FO80,46\^BCN,88,N,N,N,N/g)).toHaveLength(4);
+    expect(file).not.toContain("^TB");
+  });
+
+  it("uses KNS barcodes with correct check digits", () => {
+    for (const barcode of ["KNS99999992", "KNS00000013", "KNS12345671", "KNS00000021"]) expect(file).toContain(`^FD${barcode}^FS`);
+    expect(file).not.toMatch(/\^FDU\d/);
   });
 });

@@ -333,7 +333,7 @@ async function checkWritesRefused(supabase) {
 async function checkBarcodesHidden(supabase) {
   const attempts = [
     ["read barcodes", () => supabase.from("variant_barcodes").select("barcode").limit(1)],
-    ["look up a barcode", () => supabase.rpc("admin_scan_lookup", { p_code: "U00000013" })],
+    ["look up a barcode", () => supabase.rpc("admin_scan_lookup", { p_code: "KNS00000013" })],
   ];
   for (const [action, run] of attempts) {
     const { error } = await run();
@@ -345,6 +345,91 @@ async function checkBarcodesHidden(supabase) {
       fail(`public key cannot ${action}`, "The request was accepted. Barcodes must be readable by verified admins only; check the grants.");
     } else {
       fail(`public key cannot ${action}`, `Expected "permission denied" but got ${describeError(error)}.`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5b. Label names are admin-only; light-up details are public
+// (supabase/migrations/20261101120000_label_names_and_light_up.sql)
+// ---------------------------------------------------------------------------
+
+async function checkLabelNamesHidden(supabase) {
+  const lightUp = await supabase.from("products").select("light_up, light_up_condition, light_up_activation").limit(1);
+  if (lightUp.error?.code === "42703" || lightUp.error?.code === "PGRST204") {
+    console.log('  - skipped "read light-up details" and "read label names": the label name migration isn\'t applied yet');
+    return;
+  }
+  if (lightUp.error) fail("public key can read light-up details", describeError(lightUp.error));
+  else pass("public key can read light-up details");
+
+  const { error } = await supabase.from("products").select("label_name").limit(1);
+  if (error?.code === "42501") {
+    pass("public key cannot read label names (permission denied)");
+  } else if (!error) {
+    fail("public key cannot read label names", "The request was accepted. Check the column grants in the label name migration.");
+  } else {
+    fail("public key cannot read label names", `Expected "permission denied" but got ${describeError(error)}.`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5c. Sale prices are public (the storefront shows them); nobody can set them
+// directly (supabase/migrations/20261101130000_item_codes_and_sale_prices.sql)
+// ---------------------------------------------------------------------------
+
+async function checkSalePrices(supabase) {
+  const read = await supabase.from("products").select("price_paisa, sale_price_paisa").limit(1);
+  if (read.error?.code === "42703" || read.error?.code === "PGRST204") {
+    console.log('  - skipped "read sale prices": the item code and sale price migration isn\'t applied yet');
+    return;
+  }
+  if (read.error) fail("public key can read sale prices", describeError(read.error));
+  else pass("public key can read sale prices");
+
+  const { error } = await supabase.from("products").update({ sale_price_paisa: 1 }).eq("slug", NO_MATCH);
+  if (error?.code === "42501") {
+    pass("public key cannot set sale prices (refused)");
+  } else if (!error) {
+    fail("public key cannot set sale prices", "The request was accepted. Check the grants on products.");
+  } else {
+    fail("public key cannot set sale prices", `Expected a refusal (42501) but got ${describeError(error)}.`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 6. Orders are closed to the public key
+// (supabase/migrations/20261031120000_inventory_ledger.sql and
+// 20261031130000_guest_orders.sql). Read-only: every call is refused before
+// it reads or changes anything.
+// ---------------------------------------------------------------------------
+
+async function checkOrdersClosed(supabase) {
+  const fakeKey = "verify".padEnd(43, "x");
+  const attempts = [
+    ["read orders", () => supabase.from("orders").select("id").limit(1)],
+    ["read order items", () => supabase.from("order_items").select("id").limit(1)],
+    ["read the stock ledger", () => supabase.from("stock_movements").select("id").limit(1)],
+    ["read shop settings", () => supabase.from("shop_settings").select("orders_open").limit(1)],
+    ["read held stock", () => supabase.from("product_variants").select("reserved").limit(1)],
+    ["quote without the checkout secret", () => supabase.rpc("quote_order", { p_gateway_key: null, p_lines: [], p_city: null })],
+    ["place an order without the checkout secret", () =>
+      supabase.rpc("place_cod_order", { p_gateway_key: "not-the-secret-not-the-secret-000", p_request_key: fakeKey, p_order: {} })],
+    ["look up an order without the checkout secret", () =>
+      supabase.rpc("get_customer_order", { p_gateway_key: null, p_request_key: fakeKey })],
+    ["call an admin order function", () =>
+      supabase.rpc("admin_order_health")],
+  ];
+  for (const [action, run] of attempts) {
+    const { error } = await run();
+    if (error?.code === "PGRST205" || error?.code === "PGRST202") {
+      console.log(`  - skipped "${action}": the order migrations aren't applied yet`);
+    } else if (error?.code === "42501") {
+      pass(`public key cannot ${action} (refused)`);
+    } else if (!error) {
+      fail(`public key cannot ${action}`, "The request was accepted. Check the grants in the order migrations.");
+    } else {
+      fail(`public key cannot ${action}`, `Expected a refusal (42501) but got ${describeError(error)}.`);
     }
   }
 }
@@ -363,4 +448,10 @@ console.log("");
 await checkWritesRefused(supabase);
 console.log("");
 await checkBarcodesHidden(supabase);
+console.log("");
+await checkLabelNamesHidden(supabase);
+console.log("");
+await checkSalePrices(supabase);
+console.log("");
+await checkOrdersClosed(supabase);
 finish();

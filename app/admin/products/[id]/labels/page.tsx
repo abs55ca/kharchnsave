@@ -8,7 +8,8 @@ import { LabelPrinter } from "@/components/admin/label-printer";
 import { getScanProduct, type ScanProduct } from "@/lib/admin/scan";
 import { getAdminPageClient } from "@/lib/auth/admin";
 import { UUID_PATTERN } from "@/lib/catalog/photos";
-import { labelSize, shortLabelName } from "@/lib/labels/zpl";
+import { labelNameFor } from "@/lib/labels/name-fit";
+import { labelSize } from "@/lib/labels/zpl";
 
 export const metadata: Metadata = {
   title: "Print labels",
@@ -72,8 +73,8 @@ async function Labels({ params, searchParams }: PageProps<"/admin/products/[id]/
         Labels{sizeText ? ` for ${labelSize(Number(sizeText))}` : ""}
       </h1>
       <p className="mt-1 mb-6 text-sm text-muted">
-        {product.brand} {product.name}. Each label shows a short name, the EU size, the barcode and its ID. No price: the
-        barcode looks it up.
+        {product.brand} {product.name}. Each label shows the product’s label name (or its name), the EU size, the
+        barcode and its ID. No brand and no price: the barcode looks the price up.
       </p>
 
       {units.length === 0 ? (
@@ -89,7 +90,8 @@ async function Labels({ params, searchParams }: PageProps<"/admin/products/[id]/
         <div className="grid max-w-5xl gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]">
           <LabelPrinter
             productId={product.id}
-            defaultName={shortLabelName(product.brand, product.name)}
+            name={labelNameFor(product)}
+            typedName={product.labelName?.trim() ? product.labelName : product.name}
             itemStatus={product.itemStatus}
             units={units}
             single={sizeText !== null}
@@ -121,7 +123,7 @@ async function Labels({ params, searchParams }: PageProps<"/admin/products/[id]/
               <a href="/admin/labels/calibration" className="font-semibold text-forest underline">
                 Download the calibration labels
               </a>{" "}
-              <span className="text-muted">(3 test labels for checking the layout on the printer).</span>
+              <span className="text-muted">(4 test labels for checking that names at the width limit fit on the printer).</span>
             </p>
           </aside>
         </div>

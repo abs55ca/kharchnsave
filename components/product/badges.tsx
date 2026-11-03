@@ -28,6 +28,28 @@ export function ConditionLabel({ condition }: { condition: Condition }) {
   );
 }
 
+/** Only for light-up soles checked to work in both shoes (showsLightUpBadge). */
+export function LightUpBadge({ className = "" }: { className?: string }) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-sm bg-ink px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-lime ${className}`}
+    >
+      Light-up
+    </span>
+  );
+}
+
+/** "20% OFF" (rounded down), or "Sale" under 1%: saleBadgeText. White on the danger red: 7:1 contrast. */
+export function SaleBadge({ text, className = "" }: { text: string; className?: string }) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-sm bg-danger px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-white ${className}`}
+    >
+      {text}
+    </span>
+  );
+}
+
 export function SoldOutBadge({ className = "" }: { className?: string }) {
   return (
     <span

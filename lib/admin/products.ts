@@ -1,7 +1,9 @@
 import "server-only";
 import type { AdminSessionClient } from "@/lib/auth/admin";
 import { UUID_PATTERN } from "@/lib/catalog/photos";
+import type { LightUpCondition } from "@/lib/catalog/light-up";
 import type { Condition, Department, ItemStatus, Style } from "@/lib/catalog/types";
+import { labelNameFor } from "@/lib/labels/name-fit";
 import { paisaToRupeesText, type FieldErrors, type ProductFormValues } from "./product-input";
 
 /*
@@ -53,13 +55,20 @@ type ProductRow = {
   colour: string;
   description: string;
   price_paisa: number;
+  sale_price_paisa: number | null;
   publication_status: string;
   listed_at: string | null;
   updated_at: string;
+  label_name: string | null;
+  light_up: boolean | null;
+  light_up_condition: LightUpCondition | null;
+  light_up_activation: string | null;
   product_variants: {
     sku: string;
     size_eu: number | string;
     stock: number;
+    reserved: number;
+    inventory_version: number | string;
     // One-to-one (variant_id is unique), so PostgREST returns an object;
     // an array is tolerated too.
     variant_barcodes: { barcode: string } | { barcode: string }[] | null;
@@ -78,8 +87,9 @@ type ProductRow = {
 
 const EDIT_COLUMNS = `
   id, version, item_code, slug, name, brand, department, styles, item_status, condition,
-  condition_notes, colour, description, price_paisa, publication_status, listed_at, updated_at,
-  product_variants (sku, size_eu, stock, variant_barcodes (barcode)),
+  condition_notes, colour, description, price_paisa, sale_price_paisa, publication_status, listed_at, updated_at,
+  label_name, light_up, light_up_condition, light_up_activation,
+  product_variants (sku, size_eu, stock, reserved, inventory_version, variant_barcodes (barcode)),
   product_images (id, src, storage_path, alt, width, height, sort_order, shows_defect)
 `;
 
@@ -104,6 +114,7 @@ function toEditable(row: ProductRow): EditableProduct {
     updatedAt: row.updated_at,
     values: {
       name: row.name,
+      labelName: row.label_name ?? "",
       brand: row.brand,
       colour: row.colour,
       department: row.department as Department,
@@ -112,11 +123,24 @@ function toEditable(row: ProductRow): EditableProduct {
       condition: row.condition as Condition,
       conditionNotes: row.condition_notes.join("\n"),
       description: row.description,
+      lightUp: row.light_up === null ? "" : row.light_up ? "yes" : "no",
+      lightUpCondition: row.light_up_condition ?? "not_checked",
+      lightUpActivation: row.light_up_activation ?? "",
       price: paisaToRupeesText(row.price_paisa),
+      salePrice: row.sale_price_paisa === null ? "" : paisaToRupeesText(row.sale_price_paisa),
+      autoItemCode: false,
       itemCode: row.item_code,
       slug: row.slug,
       sizes: row.product_variants
-        .map((v) => ({ size: String(Number(v.size_eu)), stock: String(v.stock), sku: v.sku, barcode: barcodeOf(v.variant_barcodes) }))
+        .map((v) => ({
+          size: String(Number(v.size_eu)),
+          stock: String(v.stock),
+          sku: v.sku,
+          barcode: barcodeOf(v.variant_barcodes),
+          stockWas: String(v.stock),
+          inventoryVersion: String(v.inventory_version),
+          reserved: v.reserved,
+        }))
         .sort((a, b) => Number(a.size) - Number(b.size)),
     },
     photos: [...row.product_images]
@@ -148,11 +172,15 @@ export type ProductListItem = {
   status: PublicationStatus;
   itemStatus: ItemStatus;
   pricePaisa: number;
+  /** Set while on sale (below pricePaisa). */
+  salePricePaisa: number | null;
   totalStock: number;
   sizeCount: number;
   photoCount: number;
   thumbnailSrc: string | null;
   updatedAt: string;
+  /** Why its labels can't be printed yet (the name doesn't fit), or null. */
+  labelProblem: string | null;
 };
 
 export const PAGE_SIZE = 20;
@@ -171,7 +199,7 @@ export async function listProducts(
   let query = supabase
     .from("products")
     .select(
-      `id, item_code, name, brand, publication_status, item_status, price_paisa, updated_at,
+      `id, item_code, name, label_name, brand, publication_status, item_status, price_paisa, sale_price_paisa, updated_at,
        product_variants (stock), product_images (id, src, storage_path, sort_order)`,
       { count: "exact" },
     )
@@ -191,10 +219,12 @@ export async function listProducts(
     id: string;
     item_code: string;
     name: string;
+    label_name: string | null;
     brand: string;
     publication_status: PublicationStatus;
     item_status: ItemStatus;
     price_paisa: number;
+    sale_price_paisa: number | null;
     updated_at: string;
     product_variants: { stock: number }[];
     product_images: { id: string; src: string | null; storage_path: string | null; sort_order: number }[];
@@ -209,11 +239,13 @@ export async function listProducts(
       status: row.publication_status,
       itemStatus: row.item_status,
       pricePaisa: row.price_paisa,
+      salePricePaisa: row.sale_price_paisa,
       totalStock: row.product_variants.reduce((sum, v) => sum + v.stock, 0),
       sizeCount: row.product_variants.length,
       photoCount: row.product_images.length,
       thumbnailSrc: first ? (first.storage_path ? adminPhotoSrc(row.id, first.id) : first.src) : null,
       updatedAt: row.updated_at,
+      labelProblem: labelNameFor({ labelName: row.label_name, name: row.name }).problem,
     };
   });
   return { items, total: count ?? 0 };
@@ -245,7 +277,11 @@ const CONSTRAINT_MESSAGES: Record<string, { field?: keyof FieldErrors; message: 
     message: "One of these sizes’ SKUs is already used by another product. Check the item code.",
   },
   product_variants_one_per_preloved_product: { field: "sizes", message: "A pre-loved pair has exactly one size." },
-  product_variants_preloved_stock: { field: "sizes", message: "A pre-loved pair’s stock is 1 (for sale) or 0 (sold)." },
+  product_variants_preloved_stock: {
+    field: "sizes",
+    message: "A pre-loved pair’s stock is 1 (for sale) or 0 (sold, or held for an order).",
+  },
+  order_items_variant_id_fkey: { field: "sizes", message: "This size has been sold, so it can’t be removed. Set its stock to 0 instead." },
   product_variants_stock_not_negative: { field: "sizes", message: "Stock can’t be negative." },
   product_variants_size_valid: { field: "sizes", message: "Sizes are whole or half EU sizes between 15 and 50." },
   products_published_price_positive: { field: "price", message: "A published product needs a price above zero." },
@@ -256,7 +292,21 @@ const CONSTRAINT_MESSAGES: Record<string, { field?: keyof FieldErrors; message: 
   products_condition_matches_item_status: { field: "condition", message: "New shoes are always condition “New”." },
   products_item_code_not_barcode: {
     field: "itemCode",
-    message: "An item code can’t look like a barcode (U followed by 8 digits). Use a different code.",
+    message: "An item code can’t look like a barcode (KNS or U followed by 8 digits). Use a different code.",
+  },
+  products_sale_price_valid: {
+    field: "salePrice",
+    message: "The sale price must be above zero and lower than the regular price. Lower it, or clear it to end the sale.",
+  },
+  products_label_name_valid: { field: "labelName", message: "Use a label name of up to 60 characters on one line." },
+  products_light_up_condition_matches: { field: "lightUpCondition", message: "Choose whether the lights work." },
+  products_light_up_activation_valid: {
+    field: "lightUpActivation",
+    message: "Describe the lights in up to 120 characters on one line, or leave it empty.",
+  },
+  products_item_code_not_kns_barcode: {
+    field: "itemCode",
+    message: "An item code can’t look like a barcode (KNS or U followed by 8 digits). Use a different code.",
   },
 };
 
@@ -270,6 +320,12 @@ const HINT_MESSAGES: Record<string, { field?: keyof FieldErrors; message: string
   too_many_photos: { field: "photos", message: "A product can have at most 12 photos." },
   bad_transition: { message: "That status change isn’t allowed. Reload the page and try again." },
   barcode_locked: { message: "Barcodes can’t be changed or removed. Reload the page and try again." },
+  item_code_reserved: {
+    field: "itemCode",
+    message: "Codes like ITEM-000123 are assigned automatically. Use a different code.",
+  },
+  size_has_orders: { field: "sizes", message: "A size with pairs held for orders can’t be removed." },
+  inventory_version_required: { field: "sizes", message: "This page is out of date. Reload it, then change the stock again." },
 };
 
 export const CONFLICT_MESSAGE =
@@ -283,6 +339,13 @@ export type DbProblem =
 /** Turns a database error into a message an admin can act on (never raw SQL). */
 export function describeDbError(error: DbError): DbProblem {
   const code = error.code ?? "";
+  if (error.hint === "stock_changed") {
+    return {
+      kind: "field",
+      field: "sizes",
+      message: `The stock of EU ${error.details ?? "a size"} changed since you opened this page (an order or another admin). Reload to see the current stock, then make your change again.`,
+    };
+  }
   if (code === "PT409") return { kind: "conflict", message: CONFLICT_MESSAGE };
   if (code === "PT404") return { kind: "general", message: "This product no longer exists. Go back to the product list." };
   if (code === "42501") {

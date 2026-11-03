@@ -4,9 +4,10 @@ import { calibrationLabels } from "@/lib/labels/zpl";
 /**
  * GET /admin/labels/calibration
  *
- * Three test labels (no product data) for checking the label layout on the
- * shop's printer: the widest name next to the widest size, a typical long
- * name, and a ^TB text-block test. See README, "Barcodes and labels".
+ * Four test labels (no product data) for checking on the shop's printer
+ * that names at the width limit fit on one line: the widest characters, the
+ * reference name, the narrowest characters, and accents with digits
+ * (CALIBRATION_NAMES in lib/labels/zpl.ts). See README, "Barcodes and labels".
  */
 const PRIVATE = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" };
 

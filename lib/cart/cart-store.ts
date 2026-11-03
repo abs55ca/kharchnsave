@@ -143,4 +143,33 @@ export const cartStore = {
   remove(sku: string) {
     commit(cartStore.getSnapshot().filter((line) => line.sku !== sku));
   },
+
+  /** Removes several lines at once (e.g. after an order is placed). */
+  removeMany(skus: string[]) {
+    const gone = new Set(skus);
+    commit(cartStore.getSnapshot().filter((line) => !gone.has(line.sku)));
+  },
+
+  /**
+   * Applies the live prices and quantities the customer accepted at checkout:
+   * lines not listed in `updates` are left alone; a quantity of 0 removes the line.
+   */
+  applyQuote(updates: { sku: string; quantity: number; price: number; maxQuantity: number }[]) {
+    const bySku = new Map(updates.map((u) => [u.sku, u]));
+    commit(
+      cartStore
+        .getSnapshot()
+        .map((line) => {
+          const update = bySku.get(line.sku);
+          if (!update) return line;
+          return {
+            ...line,
+            price: update.price,
+            maxQuantity: update.maxQuantity,
+            quantity: Math.min(update.quantity, update.maxQuantity),
+          };
+        })
+        .filter((line) => line.quantity > 0 && line.maxQuantity > 0),
+    );
+  },
 };

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { AccessNotice } from "@/components/admin/access-notice";
 import { AdminNav } from "@/components/admin/admin-nav";
+import { RefreshOnReturn } from "@/components/admin/refresh-on-return";
 import { ScanForm } from "@/components/admin/scan-form";
 import { ScanOutcome } from "@/components/admin/scan-result";
 import { scanLookup, type ScanResult } from "@/lib/admin/scan";
@@ -44,6 +45,7 @@ async function Scan({ searchParams }: Pick<PageProps<"/admin/scan">, "searchPara
   return (
     <>
       <AdminNav current="scan" email={access.email} />
+      <RefreshOnReturn />
       <h1 className="text-2xl font-extrabold tracking-tight md:text-3xl">Scan</h1>
       <p className="mt-1 mb-6 text-sm text-muted">Look up a pair by its label. Price and stock come from the database.</p>
       <ScanForm lastCode={input.code} />

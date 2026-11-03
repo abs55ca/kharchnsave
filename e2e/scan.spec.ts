@@ -33,14 +33,14 @@ async function scanAndWait(page: Page, text: string, expected: string | RegExp) 
 async function barcodeOf(page: Page, itemCode: string, size: string) {
   await scanAndWait(page, itemCode, "Found by item code");
   const row = page.getByRole("row").filter({ hasText: `EU ${size}` }).first();
-  const barcode = (await row.textContent())?.match(/U\d{8}/)?.[0];
+  const barcode = (await row.textContent())?.match(/KNS\d{8}/)?.[0];
   expect(barcode, `barcode of ${itemCode} EU ${size}`).toBeTruthy();
   return barcode!;
 }
 
 test.describe("signed out", () => {
   test("the scan page and label files need an admin", async ({ page, request }) => {
-    await page.goto("/admin/scan?code=U00000013");
+    await page.goto("/admin/scan?code=KNS00000013");
     await expect(page).toHaveURL(/\/admin\/login\?next=%2Fadmin%2Fscan/);
 
     const file = await request.get("/admin/labels/calibration", { maxRedirects: 0 });
@@ -112,9 +112,9 @@ test.describe.serial("verified admin", () => {
   });
 
   test("typos, unknown codes and odd text get clear messages", async () => {
-    const typo = `${codes["18"].slice(0, 8)}${(Number(codes["18"][8]) + 1) % 10}`;
+    const typo = `${codes["18"].slice(0, -1)}${(Number(codes["18"].at(-1)) + 1) % 10}`;
     await scanAndWait(page, typo, "Check that code");
-    await scanAndWait(page, "U99999992", "Nothing found");
+    await scanAndWait(page, "KNS99999992", "Nothing found");
     await scanAndWait(page, "4006381333931", "manufacturer’s barcode");
     await scanAndWait(page, "NO-SUCH-CODE", "Search products for");
     await scanAndWait(page, "PL_M'1001", "That isn’t a code we use");
@@ -123,6 +123,11 @@ test.describe.serial("verified admin", () => {
   test("lowercase and spaces are ignored; an SKU works too", async () => {
     await scanAndWait(page, ` ${codes["18"].toLowerCase().slice(0, 5)} ${codes["18"].slice(5)} `, "EU 18");
     await scanAndWait(page, "DEV-NW-K-3001-20", "Found by");
+  });
+
+  test("KN5 typed by hand is read as KNS", async () => {
+    await scanAndWait(page, `kn5 ${codes["18"].slice(3)}`, "EU 18");
+    await expect(page.getByRole("article", { name: "Scan result" })).toContainText(codes["18"]);
   });
 
   test("two quick scans: the second one wins", async () => {
@@ -145,7 +150,7 @@ test.describe.serial("verified admin", () => {
     await page.getByRole("link", { name: "Print label" }).click();
     await expect(page).toHaveURL(/\/labels\?size=18$/);
     await expect(page.getByLabel("EU 18")).toHaveValue("3");
-    await expect(page.getByLabel("ZPL")).toHaveValue(/\^LT20\n\^PR4[\s\S]*\^FD>:U>5\d{8}\^FS[\s\S]*\^PQ3,0,1,N/);
+    await expect(page.getByLabel("ZPL")).toHaveValue(/\^LT20\n\^PR4[\s\S]*\^FO80,46\^BCN,88,N,N,N,N\^FD>:KNS>5\d{8}\^FS[\s\S]*\^PQ3,0,1,N/);
 
     const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Download .zpl" }).click()]);
     expect(download.suggestedFilename()).toBe(`${codes["18"]}-x3.zpl`);

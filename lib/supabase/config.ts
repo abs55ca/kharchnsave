@@ -56,3 +56,33 @@ export const SESSION_COOKIE_OPTIONS = {
 export function noStoreFetch(input: RequestInfo | URL, init?: RequestInit) {
   return fetch(input, { ...init, cache: "no-store" });
 }
+
+/**
+ * How long an admin page waits for Supabase Auth or a read. Without a limit,
+ * one stalled request leaves the page on its loading state ("Checking your
+ * access…") until the browser is refreshed; with it, the check fails closed
+ * and the page offers "Try again".
+ */
+export const SESSION_READ_TIMEOUT_MS = 10_000;
+
+/** For read-only RPCs made while a page renders: `.abortSignal(readTimeout())`. */
+export const readTimeout = () => AbortSignal.timeout(SESSION_READ_TIMEOUT_MS);
+
+/**
+ * fetch for the admin session client and the proxy: never cached, and Auth
+ * requests and reads (GET/HEAD) give up after `timeoutMs`. Writes (RPCs,
+ * photo uploads) aren't cut short: the database may already have applied
+ * them, and an abort would hide that.
+ */
+export function createSessionFetch(timeoutMs = SESSION_READ_TIMEOUT_MS) {
+  return (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : null;
+    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+    const url = new URL(request ? request.url : String(input));
+    if (method !== "GET" && method !== "HEAD" && !url.pathname.startsWith("/auth/v1/")) return noStoreFetch(input, init);
+    const timeout = AbortSignal.timeout(timeoutMs);
+    return noStoreFetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout });
+  };
+}
+
+export const sessionFetch = createSessionFetch();
