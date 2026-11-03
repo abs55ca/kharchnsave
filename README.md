@@ -89,7 +89,7 @@ supabase/
   setup/                owner-run SQL templates (placeholders only)
   tests/                SQL tests for constraints and permissions
 e2e/                    browser and HTTP tests (Playwright)
-merch/qr/               the merchandise QR code (SVG, PDF, PNG): `npm run qr`
+merch/qr/               the merchandise QR codes (SVG, PDF, PNG; light/ fallback): `npm run qr`
 ```
 
 ## Inventory model
@@ -186,7 +186,18 @@ Notes:
 | `supabase/tests/catalogue_test.sql` | Tests for the data rules and for what the public can read and write. Rolls back; leaves nothing behind |
 | `supabase/tests/product_management_test.sql` | Tests for admin access by role and two-step status, publishing rules, stable IDs and conflicting saves. Rolls back |
 | `supabase/migrations/20261029200000_variant_barcodes.sql` | In-store barcodes: one permanent barcode per size, the admin-only register and the read-only scan lookup (see [Barcodes and labels](#barcodes-and-labels)) |
+| `supabase/migrations/20261030120000_kns_barcodes.sql` | Barcode format `KNS` + 8 digits: retires the first U barcodes and gives those sizes KNS ones, one use per serial number, item-code rule, `KN5` read as `KNS` when scanning |
 | `supabase/tests/barcodes_test.sql` | Tests for barcode format, assignment, uniqueness, immutability, access and the lookup. Rolls back |
+| `supabase/migrations/20261031120000_inventory_ledger.sql` | Held stock (`reserved`), an inventory version per size, the add-only stock ledger with opening balances, and stock changes only through approved functions (see [Checkout and orders](#checkout-and-orders)) |
+| `supabase/migrations/20261031130000_guest_orders.sql` | Shop settings, orders, order items, history and returns, the checkout gateway, rate limits, hold expiry and the guest and admin order functions |
+| `supabase/migrations/20261031140000_settings_where_clauses.sql` | Adds WHERE clauses to the settings and delivery-city functions; Supabase's API refuses UPDATE or DELETE without one (pg-safeupdate) |
+| `supabase/migrations/20261101120000_label_names_and_light_up.sql` | Optional label name (admin-only; the publishable key reads products column by column without it) and light-up soles (not recorded / no / yes with a condition); the admin product functions save them without touching stock |
+| `supabase/migrations/20261101130000_item_codes_and_sale_prices.sql` | Automatic item codes (`ITEM-000001`, from their own sequence) and optional sale prices; checkout, in-store sales and order snapshots charge the sale price |
+| `supabase/tests/item_codes_sale_prices_test.sql` | Tests for code assignment and collisions, existing codes, the sale price rules, quotes, free delivery, orders and in-store sales at sale prices, and historical orders. Rolls back and puts its counters back |
+| `supabase/tests/label_names_light_up_test.sql` | Tests for the label name and light-up rules, who can read the label name, and that saving them leaves stock, held pairs, inventory versions and the ledger alone. Rolls back |
+| `supabase/tests/orders_test.sql` | Tests for order permissions, the gateway secret, checkout, retries, hold expiry, admin actions, delivery and payment, returns, in-store sales, stale stock edits and ledger reconciliation. Rolls back |
+| `supabase/setup/schedule_order_expiry.sql` | Schedules the hold-expiry job (needs `pg_cron`) |
+| `supabase/setup/checkout_gateway_key_TEMPLATE.sql` | Registers the checkout gateway secret's hash |
 | `scripts/verify-catalogue.mjs` | `npm run db:verify`: checks the fixtures through the API using the publishable key |
 
 What the schema enforces:
@@ -497,12 +508,16 @@ The server checks these first, for clear messages, and the database enforces the
 | Pre-loved | One physical pair: exactly one EU size, stock 1 (for sale) or 0 (sold). Condition Excellent, Very Good or Good |
 | New (kids) | One or more sizes, each with whole-number stock from 0 to 9,999. Condition is always New |
 | Sizes | EU 15–50, whole or half sizes, no duplicates |
-| Price | Typed in rupees (`8500`, `8,500.50`); stored as exact integer paisa; up to Rs. 10,00,000 |
+| Price | **Regular price**, typed in rupees (`8500`, `8,500.50`); stored as exact integer paisa; up to Rs. 10,00,000 |
+| Sale price | Optional. Above zero and **strictly below** the regular price (checked by the form and by the database). Empty means no sale; clearing it ends the sale. While set, it's what customers pay everywhere: product cards and pages, price sorting and filters, the cart, checkout quotes, orders, the free-delivery threshold and in-store sales. The shop shows it with the regular price struck through and a "20% OFF" badge (rounded down; "Sale" under 1%); the percentage is calculated, never stored. A sale that starts, changes or ends between a customer's quote and their order triggers the usual "something changed" step at checkout. Orders already placed keep their prices |
 | New products | Always created as drafts |
 | Publishing | Needs a price above zero, a description, at least one style, at least one size and at least one photo. Zero stock is allowed (it shows as sold out) |
+| Item codes | **Automatically generate item code** (ticked by default on Add Product) has the database assign `ITEM-000001`, `ITEM-000002`, … when the draft is created, from its own sequence (never the barcode sequence, a row count or MAX + 1); a number some product already uses is skipped. Typed codes can't take that form. Once assigned, the code behaves like any other: kept on every save, fixed once published. Untick the box to type a code |
 | Identifiers | The product ID never changes. Item codes, web addresses and SKUs are unique. SKUs are made automatically as `<item code>-<size>` (e.g. `PL-M-1001-42.5`). Once a product has been published, its item code, SKUs and sizes are fixed and its sizes can't be removed (set stock to 0), so an SKU is never reused. Changing a published product's web address is allowed but breaks links people already have |
 | Conflicts | Every product has a version number. A save names the version it started from; if someone else saved in between, it's refused ("Someone else saved this product…") instead of overwriting their work. Photo uploads and status changes work the same way |
 | No deletion | Products are archived, never deleted, through the website or the API |
+| Label name | Optional, for printed labels only (see [Printing labels](#printing-labels)). A label name that's typed or changed must fit the label; a product name too wide for the label doesn't block saving other changes, it blocks printing |
+| Light-up soles | **Yes**, **No** or **Not recorded** (every product until someone checks; never assumed to be No). Yes needs a condition: Not checked, Both shoes work, One shoe works or Neither works, and may have a short description of how the lights activate, in the admin's own words. The shop shows a **Light-up** badge (product cards and page) only for Both shoes work; the product page states any other condition ("Lights not tested", "only one shoe", "don't work"). Editing these never changes stock |
 
 ### Product photos
 
@@ -688,15 +703,23 @@ are unchanged; the barcode is a separate value.
 
 ### Barcodes
 
-- **Format:** `U` + a 7-digit serial number + a check digit, e.g. `U00000013`. The only
-  letter is `U`, which can't be mistaken for a digit. The check digit (Damm algorithm)
-  catches every single-digit typo and every swap of two neighbouring digits when a code is
-  typed by hand. About 10 million barcodes are possible.
+- **Format:** `KNS` + a 7-digit serial number + a check digit, e.g. `KNS00000013`. The
+  check digit (Damm algorithm, over the 7 digits) catches every single-digit typo and every
+  swap of two neighbouring digits when a code is typed by hand. `S` is easily typed as `5`,
+  so the scan box reads `KN5` + 8 digits as `KNS`. About 10 million barcodes are possible,
+  and each serial number is used once, whatever the prefix.
+- **Retired U barcodes:** the first test labels used `U` + the same 8 digits (e.g.
+  `U00000084`, only ever on `kharchnsave-dev`).
+  `20261030120000_kns_barcodes.sql` retired them all and gave each of those sizes a KNS
+  barcode with a new serial number. They stay in the register; scanning one says the label
+  is no longer in use and shows the size's current barcode. No U barcode is issued any
+  more, and a U barcode can't belong to a size.
 - **Assigned when a size is created,** drafts included, so a pair can be labelled before it
   is photographed or published. The database issues them; nobody can choose one.
 - **Never changed, moved, deleted or reused,** not even by the database owner (a trigger
   refuses it). Unpublishing, archiving, restoring, stock changes and a draft's item-code
-  change all keep the barcode.
+  change all keep the barcode. The one exception was the switch to KNS above, done once by
+  that migration: the test sizes got a new barcode, and their U barcodes were kept, retired.
 - **Removed sizes:** a draft's size can still be removed (or its EU size changed, which
   replaces it). Its barcode is then **retired**: kept in the register, never reused, and
   scanning it says the label is no longer in use. The product editor warns before you save
@@ -704,8 +727,8 @@ are unchanged; the barcode is a separate value.
 - **Admin-only:** barcodes live in their own table, `variant_barcodes`, readable only by
   verified admins (membership + two-step verification). The storefront and the public key
   can't see them.
-- **Item codes can't look like barcodes** (`U` followed by 8 digits), so a scan is never
-  ambiguous.
+- **Item codes can't look like barcodes** (`KNS`, `KN5` or `U` followed by 8 digits), so a
+  scan is never ambiguous. Other item codes starting with `KNS`, e.g. `KNS-0001`, are fine.
 
 ### Scanning: `/admin/scan`
 
@@ -719,7 +742,7 @@ shop yet), **sold** (pre-loved, stock 0) or **out of stock** (new, stock 0 in th
 when a label is **no longer in use** (retired), when a typed code has a **typo**, and when
 **nothing is found** (with a hint if it looks like a manufacturer's box barcode). Typing an
 **item code** lists every size with its barcode; an exact **SKU** also works. Letters may be
-typed in lower case and spaces are ignored.
+typed in lower case, spaces are ignored, and `KN5…` typed by hand is read as `KNS…`.
 
 **Scanning never changes anything.** Lookups are GET requests answered by
 `admin_scan_lookup`, a `STABLE` database function: Postgres refuses any insert, update or
@@ -728,12 +751,27 @@ delete inside one.
 ### Printing labels
 
 **Print label** (on each saved size in the product editor, and on a scan result) opens
-`/admin/products/[id]/labels`. Each label has a short name, the EU size, a Code 128
-barcode and its readable ID underneath. **No shop branding and no price.**
+`/admin/products/[id]/labels`. Each label has the product's name, the EU size, a Code 128
+barcode and its readable ID underneath. **No brand, no shop branding and no price.**
 
-- **Short name:** brand and name (without "Unbranded"), cut at a whole word to at most 18
-  characters, e.g. "New Balance Fresh Foam X 1080" → "New Balance Fresh". You can type a
-  different short name for one print; the product isn't changed.
+- **Name:** the product's **label name** (set in the product editor, next to a live
+  preview), or its full product name when that's blank. The website always shows the full
+  name. Every print and reprint (label page, Copy ZPL, Download .zpl) uses the same saved
+  name; there's no one-off name any more, so a reprint matches the first print. A name
+  that doesn't fit is **never shortened**: the label page explains why and links to the
+  product, and the download route refuses it (409).
+- **Fit rule** (`lib/labels/name-fit.ts`): one line, at most **224 dots** of estimated
+  printed width in the 228-dot name box (4 dots spare). Width is measured per character,
+  not counted: about 11 × "W" or 37 × "l" fit. Character widths are Arial Narrow Bold's,
+  as an estimate of the printer's font 0 (CG Triumvirate Bold Condensed, whose metrics
+  Zebra doesn't publish); "New Balance 574 Wh" measures 213 dots and printed on one line.
+  Printable: ASCII letters, digits, punctuation and spaces, and Latin-1 accented letters
+  (é, ñ, ü…). Curly quotes and dashes print as plain ones (the preview says "Prints as …").
+  Anything else (emoji, other scripts, control characters) is refused by name. `^`, `\`,
+  the tilde and `_` are sent as `^FH` hex escapes, so a name can never inject ZPL commands.
+- **Preview:** a drawing of the label at its real layout, with the name stretched to its
+  estimated width. The browser doesn't have the printer's font, so the preview shows size
+  and fit, not exact letter shapes; the bars only show the barcode's real width.
 - **Quantity:** 1 for a pre-loved pair; for new shoes, the stock of that size. 1 to 100 per
   size. "Labels for all sizes" puts every size of a new style in one file.
 - **Printing (works today):** **Download .zpl** or **Copy ZPL**, then in **Zebra Setup
@@ -742,46 +780,54 @@ barcode and its readable ID underneath. **No shop branding and no price.**
   prints to the USB printer directly.
 
 **Layout** (203 dpi, 406 × 203 dots, `^LT20` label top, `^PR4` print speed, both included
-in every label; UTF-8 text with `^CI28`). Printed and checked on the shop's ZD888: an
-18-character name ("New Balance 574 Wh") and `EU 42.5` each print cleanly on one line.
+in every label; UTF-8 text with `^CI28`). Printed and checked on the shop's ZD888:
+"New Balance 574 Wh" and `EU 42.5` each print cleanly on one line.
 
 | Element | Position | Notes |
 | --- | --- | --- |
-| Short name | `^FO28,14`, font `^A0N,26,26`, field `^FB228,1,0,L` (x 28–256) | The field ends 10 dots before the size's field starts, so even an over-wide name wraps inside its own box and never reaches the size |
+| Name | `^FO28,14`, font `^A0N,26,26`, field `^FB228,1,0,L` (x 28–256) | One line. The field ends 10 dots before the size's field starts. Names wider than 224 estimated dots are refused |
 | EU size | `^FO266,14`, font `^A0N,26,26`, field `^FB112,1,0,R` (x 266–378) | e.g. `EU 42.5` |
-| Barcode | `^BY2`, `^FO102,46^BCN,88,N,N,N,N` (y 46–134) | Centred: 202 dots wide |
-| Readable ID | `^FO0,145`, font `^A0N,30,30`, `^FB406,1,0,C` | e.g. `U00000013` |
+| Barcode | `^BY2`, `^FO80,46^BCN,88,N,N,N,N` (x 80–326, y 46–134) | Centred: 246 dots wide |
+| Readable ID | `^FO0,145`, font `^A0N,30,30`, `^FB406,1,0,C` | e.g. `KNS00000013` |
 
 Both text boxes keep at least 28 dots (3.5 mm) from the label's left and right edges.
 
 **Barcode width:** a Code 128 symbol is 11 modules (start) + 11 per symbol + 11 (check) +
-13 (stop). `U00000013` is encoded as Code B for `U`, a switch to Code C, then 4 digit
-pairs: 6 symbols, **101 modules = 202 dots** (25.3 mm) at `^BY2`. Code 128 needs 10
-modules (20 dots) of white on each side; centred, there are 102 dots each side. Even if
-every character were encoded in Code B (9 symbols, 268 dots), it would still fit. The
+13 (stop). `KNS00000013` is encoded as Code B for `KNS`, a switch to Code C, then 4 digit
+pairs: 8 symbols (the fewest possible), **123 modules = 246 dots** (30.8 mm) at `^BY2`.
+Code 128 needs 10 modules (20 dots) of white on each side; centred, there are 80 dots each
+side. Even if every character were encoded in Code B (11 symbols, 312 dots), it would
+still fit. The barcode sits below the name and size (which end at y 40), so its extra
+width can't touch them. The
 generator allows at most **12 characters**: with 20 dots of quiet zone plus 8 dots (1 mm)
 of position tolerance per side, a symbol may be at most 350 dots = 175 modules, and
 35 + 11 × 12 = 167 ≤ 175 (13 characters would need 178).
 
 **Text block (`^TB`):** Zebra documents `^TB` for firmware V60.14.x / V50.14.x and later,
 but not whether the ZD888's V102.01.07Z firmware supports it, so labels rely on the
-18-character limit and the fixed-width `^FB` field instead.
+width check and the fixed-width `^FB` field instead.
 
 **Calibration print** (do this once before printing real labels): on any label page,
 **Download the calibration labels** (`/admin/labels/calibration`) and send the file to
-the printer. It prints three labels:
+the printer. It prints four labels, each next to `EU 42.5`, with names the width check
+accepts at (or close to) its limit:
 
-1. the worst case, 18 × "W" next to `EU 42.5`: "W" is so wide that the name overprints
-   itself inside its box; check it never reaches the size and the size stays readable;
-2. the checked reference, "New Balance 574 Wh" (18 characters) with `EU 42.5`: both should
-   print cleanly on one line, as on the label already checked;
-3. the same as 1 but with `^TB`: if the name is cut off neatly inside its box, the firmware
-   supports `^TB`; if it runs across the label, it doesn't (the normal labels don't use it).
+1. 11 × "W", the widest character (about 222 dots);
+2. the checked reference, "New Balance 574 Wh" (about 213 dots);
+3. 37 × "l", the narrowest character (about 220 dots);
+4. "Écru Navy Trainers 31", accents and digits, exactly at the limit (224 dots).
 
-Then scan each label's barcode into `/admin/scan`: the calibration barcodes (`U99999992`,
-`U00000013`, `U12345671`) should give "Nothing found" or an existing size, never "Check that
-code". If anything is cut off or crowded, note which label and what, so the positions in
-`lib/labels/zpl.ts` can be adjusted.
+Every name must print on **one line**, inside its box and clear of the size. If one wraps,
+prints over itself or touches the size, the width estimate is too generous: raise
+`NAME_SPARE_DOTS` in `lib/labels/name-fit.ts` and test again. If all four leave clear
+room, the limit could be raised later, but only after another print test.
+
+Then scan each label's barcode into `/admin/scan`: the calibration barcodes (`KNS99999992`,
+`KNS00000013`, `KNS12345671`, `KNS00000021`) should give "Nothing found" or an existing size, never "Check
+that code". If anything is cut off or crowded, note which label and what, so the positions
+in `lib/labels/zpl.ts` can be adjusted. The wider KNS barcode (246 dots, 30.8 mm, instead
+of the 202 dots already printed with U) hasn't been printed yet: reprint the calibration
+labels once and check the bars and the 11-character ID print cleanly and scan.
 
 **Later printing options** (not built):
 
@@ -793,17 +839,13 @@ code". If anything is cut off or crowded, note which label and what, so the posi
 | Network printing (port 9100) | Printing without USB | A networked printer and a local helper; the hosted site can't reach the shop's network, and the printer must never be exposed to the internet |
 | WebUSB | Direct USB from Chrome or Edge | Replacing the Windows driver with WinUSB, which breaks Zebra Setup Utilities. Not recommended |
 
-### Selling later (design notes, nothing built)
+### Selling in the shop
 
-A confirmed sale should be one database function that, in a single transaction, locks the
-sizes involved, checks there is enough stock, lowers it, records the sale and its lines
-(size, barcode and price at the time), and bumps the product's `version` so an open editor
-can't overwrite the lower stock. A request ID makes a double-submitted scan harmless; the
-`stock >= 0` and pre-loved `stock <= 1` rules are the last line of defence.
-
-**Open question:** which products can be sold in the shop. Don't assume only published
-ones: a pair may be on the shelf before its listing is published, so whether drafts (and
-never archived products?) can be sold at the counter is still to be decided.
+The database side exists: `admin_record_in_store_sale` sells sizes with the same stock
+rules and locks as online orders (see [Checkout and orders](#checkout-and-orders)). There
+are no till screens yet. Scanning stays read-only; a sale is always a separate, explicit
+action. Whether draft or archived products may be sold at the counter is a setting
+(`in_store_sells_unpublished`), and refused until it is decided.
 
 ### Setting it up on `kharchnsave-dev` (in this order)
 
@@ -825,6 +867,36 @@ Running the SQL tests leaves small gaps in the serial numbers (the tests create 
 transaction that is rolled back, and Postgres never gives sequence numbers back). Those
 numbers were never issued to anything, so this is harmless.
 
+### Switching `kharchnsave-dev` to KNS barcodes
+
+`20261030120000_kns_barcodes.sql` goes with the version of the site that prints KNS
+labels: until both are in place, label printing refuses the other format. Scanning works
+throughout.
+
+1. **SQL Editor → New query**, check that no item code is in the way (the migration would
+   stop on it):
+   `select item_code from public.products where item_code ~ '^KN[S5][0-9]{8}$';`
+   Expect no rows.
+2. **New query**: paste all of `supabase/migrations/20261030120000_kns_barcodes.sql` and
+   **Run**. Expect "Success. No rows returned".
+3. **New query**, check the result:
+
+   ```sql
+   select b.barcode, b.sku_at_issue, b.variant_id is not null as live
+   from public.variant_barcodes b
+   order by b.product_id, b.size_eu, b.created_at;
+   ```
+
+   Each size should have its old `U…` row (`live` false) followed by one `KNS…` row
+   (`live` true), with serial numbers after the U ones. A size removed before today has
+   only its U row.
+4. Run `supabase/tests/barcodes_test.sql` as above (and optionally the other three).
+5. `npm run db:verify`.
+6. With this version of the site running against `kharchnsave-dev`: scan the old test label
+   (`U00000084`). It should say the label is no longer in use and show the size's new KNS
+   barcode, with a link to print its label. Print it, reprint the calibration labels, and
+   scan them. Then throw the U label away.
+
 ### Tests
 
 | Command | What | Needs |
@@ -838,8 +910,16 @@ set. Never point them, or `e2e/fixtures.sql`, at a hosted project.
 
 ### Barcodes verification status
 
-- **Unit tests:** 37/37 pass. Lint, type-check and production build pass.
-- **SQL:** all four migrations and all four SQL test files (265 checks, including the 57
+- **Unit tests:** barcode and label tests pass. Lint, type-check and production build pass.
+- **KNS migration:** in PGlite (below) on dev-like data: sizes with U barcodes, one of them
+  already retired, then `20261030120000_kns_barcodes.sql`. Every size ended up with one
+  KNS barcode with a new serial number. Every U row was kept unchanged apart from its size
+  link, and the already-retired one got no replacement. Scanning an old U label (typed in
+  lower case) named the new barcode, and `kn5 …` found the size. Also run on the
+  production path (no sizes when the migrations run): no U barcode ever exists, and the
+  first size gets `KNS00000013`. Two deliberate breakages (no serial index; no KN5 rule)
+  made `barcodes_test.sql` fail, as it should.
+- **SQL:** all five migrations and all four SQL test files (276 checks, including the 68
   barcode checks) ran without errors in PGlite, a WebAssembly build of Postgres, with small
   stand-ins for Supabase's `auth` functions, API roles, default grants, `storage.objects`
   and an `rls_auto_enable()`-style event-trigger function, and also with real
@@ -852,9 +932,10 @@ set. Never point them, or `e2e/fixtures.sql`, at a hosted project.
   The first run of `barcodes_test.sql` failed only on its search_path check, which also
   flagged Supabase's own `rls_auto_enable()`. The check now applies the strict rule to
   every SECURITY DEFINER function except event triggers (which our migrations never create).
-  Re-run the test there to confirm.
+  Re-run the test there to confirm. The KNS migration hasn't been applied there yet (see
+  the steps above).
 - **Not run yet:** the browser tests (no local Supabase/Docker available), and a real print
-  and scan on the ZD888 and DS4308.
+  and scan of a KNS label on the ZD888 and DS4308.
 
 ## Links page and merchandise QR code
 
@@ -878,46 +959,340 @@ the shop's chrome. The header and footer are still included in those pages' Reac
 (about 30 KB on `/links`, invisible); moving the shop's pages into a route group with
 their own layout would remove that if it ever matters.
 
-**The QR code** (`npm run qr`, files and printing advice in `merch/qr/README.md`) always
-encodes `QR_CODE_URL` (`https://kharchnsave.pk/qr`), never the address the site is
-running on. Version 6 (41 × 41), error correction H, 4-module border, forest green on
-white, the K mark on a white tile of exactly 15 × 15 modules with whole modules cleared
-under it. Of the 8 mask patterns, it uses the one that leaves the most error correction
-spare after the tile: at most 10 of the 14 errors each block can fix are used,
-counting modules under the mark's edges and the lime tag as misread.
+**The QR codes** (`npm run qr`, files and printing advice in `merch/qr/README.md`) always
+encode `QR_CODE_URL` (`https://kharchnsave.pk/qr`), never the address the site is
+running on. Version 6 (41 × 41), error correction H, a 4-module quiet zone, and the K
+mark in the centre on a cleared area of exactly 15 × 15 modules (whole modules cleared,
+no tile). Two designs:
+
+- **Main** (`merch/qr/`): white modules and the white K mark (`public/brand/logo-white.svg`)
+  on forest green, quiet zone included. This is an **inverted** code: test printed
+  proofs on several phones, including older Android phones and the WhatsApp and
+  Instagram scanners, before ordering.
+- **Light** (`merch/qr/light/`): forest-green modules and the green K mark on white, a
+  normal code, for merchandise where scanning reliability matters more than looks.
+
+For each design, of the 8 mask patterns it uses the one that leaves the most error
+correction spare after the logo area: at most 10 of the 14 errors each block can fix
+are used, counting modules under the mark's edges and the lime tag as misread.
 
 **Tests:**
 
-- `npm test` decodes the committed PNG and SVG with two real decoders (jsQR and ZXing):
-  clean, with two white scratches across them, and blurred (0.3 modules). It also
-  checks the tile and the PDF (one 50 mm page, vector only), that the files are up to
-  date, and that the per-block error count predicts both decoders: each block still
-  decodes with 14 errors in the worst case, and fails with 15 certain ones. Also
-  covered: `/qr`'s 307 and headers, and that `/links` renders every configured link.
+- `npm test` decodes the committed PNG and SVG of both designs with two real decoders
+  (jsQR and ZXing; the main design in their inverted mode): clean, with two scratches
+  across them, and blurred (0.3 modules). It also checks that the main design, with its
+  colours inverted, decodes as an ordinary dark-on-light code (and that a scanner
+  without inverted support can't read it as printed), the logo area, the PDFs (one 50 mm
+  page, vector only), that the files are up to date, and that the per-block error count
+  predicts both decoders: each block still decodes with 14 errors in the worst case,
+  and fails with 15 certain ones. Also covered: `/qr`'s 307 and headers, and that
+  `/links` renders every configured link.
 - `e2e/links.spec.ts` checks the same against a running build over HTTP (no browser
   needed): `npm run build`, `npm start`, then
   `E2E_BASE_URL=http://localhost:3000 npx playwright test e2e/links.spec.ts`.
 
-## Enabling real checkout
+## Checkout and orders
 
-No payment provider is configured in this project, so the cart is a clearly labelled demo
-and `/checkout` explains that ordering isn't available yet. There is no payment form and
-no fake order confirmation.
+Guest checkout with **cash on delivery**, admin order management, and stock rules shared
+with in-store sales. It is built and tested, and **switched off**: the website shows the
+"Checkout isn't connected yet" page until it is configured, and the database refuses
+orders until `shop_settings.orders_open` is on, which it can't be until every required
+setting is decided.
 
-To take real orders you'll need:
+### How an order works
 
-1. **Real listings** in the catalogue, added in the admin area (see
-   [Product management](#product-management)).
-2. **Code changes:**
-   - Reimplement `lib/catalog/catalog.ts` with Supabase queries.
-   - Replace `lib/cart/cart-store.ts` with a server-side cart and order flow so stock
-     and prices are re-checked, and unique pairs reserved, on the server.
-   - Remove the demo notices (`DemoCheckoutNote`, the product-page sample notice, the
-     footer note) and the `robots` noindex rule.
-3. **Payments:** integrate a payment option that works in Pakistan (for example a local
-   gateway, or cash on delivery if you offer it).
-4. **Order emails, delivery charges and customer accounts**, which Supabase doesn't
-   provide out of the box.
+1. **Cart → `/checkout`.** The page asks the database for a live quote (prices, stock,
+   delivery). It is never cached. Anything that changed since the item was added is
+   shown on its line ("Price is now…", "Only 1 available now…", "Sold out…"). Nothing is
+   ordered until the customer taps **Update my cart** and places the order.
+2. **Details:** full name, Pakistani mobile number, city, full address, optional landmark
+   and note. These fields are provisional: confirm them against TCS's booking
+   requirements before going live (city names, required fields, length limits).
+3. **Place order:** the server checks the input, the rate limits and the Turnstile check,
+   then the database recalculates every price, the delivery fee and the total from its own
+   rows. If anything differs from what the customer saw, no order is placed and the new
+   quote is shown instead.
+4. **Placed:** the pairs are held for the order (`reserved`) for the hold time (24 hours),
+   the cart is emptied, and the customer sees `/order#k=…`, a private link (see below).
+5. **Admin:** confirms by phone or WhatsApp, dispatches with the courier and tracking
+   number, then records delivery, a failed delivery, a return and the payment.
+
+### Stock: available and held
+
+| Column | Meaning |
+| --- | --- |
+| `product_variants.stock` | Pairs available to sell now (what the shop shows) |
+| `product_variants.reserved` | Pairs held for online orders not yet dispatched |
+| `stock + reserved` | Pairs on the shelf |
+
+| Event | Available | Held | Ledger reason (once per…) |
+| --- | --- | --- | --- |
+| Order placed | −q | +q | `order_reserve` (item) |
+| Cancelled or hold expired, before dispatch | +q | −q | `order_release` (item) |
+| Dispatched | | −q | `order_dispatch` (item) |
+| Failed delivery, delivered | | | (none: the parcel is out) |
+| Parcel back, pair restocked | +n | | `return_restock` (return line) |
+| Parcel back, pair written off | | | `return_write_off` (return line, recorded only) |
+| In-store sale | −q | | `in_store_sale` (item) |
+| Admin stock edit | ±, if unchanged since loaded | | `admin_set` |
+
+Every change to `stock` or `reserved`, from any source, writes a row to
+`public.stock_movements` (a trigger does it), so for every size `stock` = sum of
+`available_delta` and `reserved` = sum of `reserved_delta`. The migration starts each
+existing size with an `opening_balance` row. Each order or return movement has a unique
+`event_key`, so it can only be applied once.
+
+**Admins can no longer write sizes through the API directly.** The product form sends,
+for each size, the stock and inventory version it loaded: a size's stock is written only
+if the admin changed it, and only if nobody (an order, another admin) changed it since.
+The version only ever increases, so 3 → 2 → 3 still counts as a change. Saving just the
+description never touches stock.
+
+### Order statuses and payment
+
+| Status | Next |
+| --- | --- |
+| `awaiting_confirmation` | `confirmed`, `cancelled` (admin, or the hold expires) |
+| `confirmed` | `dispatched`, `cancelled` |
+| `dispatched` | `delivered`, `delivery_failed` |
+| `delivery_failed` | `dispatched` (try again), `delivered`, `returned` |
+| `delivered` | `returned` |
+| `cancelled`, `returned` | none |
+
+In-store sales are `completed`. Payment is what staff record; **the app never moves
+money**:
+
+| Payment | When |
+| --- | --- |
+| `pending` | Not collected yet. Stays pending through a failed delivery, which may be retried |
+| `collected` | Delivered and the courier collected the full total |
+| `settled` | The courier paid the shop |
+| `refund_due` | A paid order came back |
+| `refunded` | A refund was made outside the app (amount up to what was collected) |
+| `void` | Cancelled, or returned without anything collected |
+
+A dispatched order can't be cancelled and its stock isn't restored by a failed delivery:
+pairs come back on sale only when the parcel is received and each pair is checked.
+
+### Locking and retries
+
+Every operation takes its locks in one order: the request key (an advisory lock), then
+`shop_settings`, then orders, then products, then sizes, each by id. Placing an order
+holds the products it sells for reading, so a price change, unpublishing or a delivery-fee
+change either waits for it or makes it see the new values (and return "quote changed").
+The stock check and the order are one transaction. Lock waits are capped (2 s for orders,
+5 s for the expiry job). The website retries lock timeouts, deadlocks, serialization
+failures and network errors at most three times (`lib/db/retry.ts`); that is safe
+because every order call carries its checkout key and every admin action a request id,
+so a repeat returns the first result.
+
+### Order hold expiry
+
+An unconfirmed order holds its pairs until `hold_expires_at` (24 hours). Then:
+
+- **Scheduled job:** `private.expire_order_holds()` runs every minute through `pg_cron`
+  and releases expired orders, each order whole or not at all. Set up with
+  `supabase/setup/schedule_order_expiry.sql` after enabling `pg_cron`.
+- **Failures stay visible:** the work runs inside an inner block, so a failed run is
+  rolled back but still recorded in `private.job_heartbeats` (and in
+  `cron.job_run_details`). The admin Orders and Settings pages warn if the job isn't
+  scheduled, hasn't succeeded for 10 minutes, failed, or left holds overdue by 5 minutes,
+  and offer **Release expired holds now**.
+- **Backups:** placing an order or an in-store sale releases expired orders on the sizes
+  it needs first, and confirming an expired order releases it instead.
+- **In the shop's pages:** the job can't reach Next.js, so a released pair appears when
+  the cached catalogue next refreshes (in the background, at most once a minute while
+  the shop gets visits; a page already open in a browser may keep its copy up to 5
+  minutes). Checkout itself always reads live stock. Admin cancellations and returns
+  refresh the catalogue at once.
+
+### Security and privacy
+
+- **The publishable key is public**, so the guest functions (`quote_order`,
+  `place_cod_order`, `checkout_resolve`, `get_customer_order`,
+  `checkout_register_attempt`) all require the **checkout gateway secret**. Only the
+  website has it; the database stores only its SHA-256 hash. A call straight to the API
+  without it is refused before anything is read.
+- **Visitors** have no access to any order table; they can read only the storefront's
+  size columns (not held stock). **Signed-in users** may `SELECT` the order tables, but
+  row-level security returns rows only to verified admins (member + aal2). **Nobody**
+  writes order tables or sizes directly; only the functions do. Internal helpers and
+  private tables live in the `private` schema, which API roles can't use at all.
+- **Bot protection:** Cloudflare Turnstile, checked on the server and bound to the order
+  attempt; shared per-connection and whole-shop rate limits in the database; per-order
+  limits; hold expiry; and a per-phone limit, which is only supplementary because
+  anyone can type a different number. If Turnstile can't be reached, orders are refused.
+- **The order link** `/order#k=…` carries a 32-byte random key in the part after `#`,
+  which browsers never send to servers; the page posts it in the request body. The
+  database stores only its hash. An order number plus phone number is never enough. The
+  page shows the first name, the last three digits of the phone number, the city, items
+  and totals, never the address.
+- **Retries never duplicate:** the key is made in the browser and kept (with a
+  description of the cart, but no personal details) until the outcome is known. The same
+  key with the same contents returns the existing order; with different contents it is
+  refused. Before a new key is made after the cart changes, the old one is settled: the
+  order is shown if it exists, otherwise the key is marked abandoned so a late request
+  can never use it.
+- **Logs** hold database error codes only, never personal details or keys.
+
+### Checkout: setup
+
+Nothing here has been done on any hosted project. There are three separate stages, and
+the first two need no public deployment.
+
+#### A. Apply the migrations to `kharchnsave-dev`
+
+In the dev project's SQL Editor:
+
+1. Run `supabase/migrations/20261031120000_inventory_ledger.sql`, then
+   `supabase/migrations/20261031130000_guest_orders.sql`, then
+   `supabase/migrations/20261031140000_settings_where_clauses.sql`, then
+   `supabase/migrations/20261101120000_label_names_and_light_up.sql`, then
+   `supabase/migrations/20261101130000_item_codes_and_sale_prices.sql`. Each runs as one
+   transaction: if it fails, nothing changes.
+2. Run every `supabase/tests/*.sql` file. They roll back and leave nothing behind.
+3. Optional now, needed before taking orders: enable `pg_cron` (Dashboard →
+   Integrations → Cron) and run `supabase/setup/schedule_order_expiry.sql`. It is safe
+   to run again and keeps exactly one job. A few minutes later,
+   `select * from private.job_heartbeats;` should show a recent `last_succeeded_at`.
+   **This pg_cron step has not been verified anywhere yet.** The script's own logic is
+   tested against a stand-in, not real pg_cron.
+
+**Which code goes with which database.**
+
+| Code | Database | What happens |
+| --- | --- | --- |
+| This version (local) | dev **without** the migrations | Storefront, dashboard, product list, scan and labels work. **The product edit page fails to load** (it reads `reserved` and `inventory_version`). Adding a product saves it, but the redirect to its edit page then fails. **Orders and Settings show errors.** Checkout stays off unless configured. |
+| This version (local) | dev **with** the migrations | Everything works. |
+| The previous version (e.g. a hosted deployment of `c0aa0d6`) | dev **with** the migrations | Storefront, scan and labels work. Its product editor loads, but any stock change it saves is refused ("stock change must name the inventory version"). Nothing is lost. |
+
+So apply the migrations before using the product editor with this version. Since the label
+name and light-up change, this version also reads the new product columns: **without
+`20261101120000_label_names_and_light_up.sql` the shop's product pages and the product
+editor show errors.** Code from before that change keeps working with it applied (it
+doesn't read the new columns, and its saves keep their values). The same holds for
+`20261101130000_item_codes_and_sale_prices.sql`: this version reads `sale_price_paisa`, so
+apply it before running this code against dev.
+
+#### B. Run this version locally against `kharchnsave-dev`
+
+No deployment needed. `.env.local` already points the site at dev.
+
+1. Run the site as usual (`npm run dev`, or `npm run build && npm start`). Restart the
+   dev server after pulling this code. The admin area, Orders and Settings work at once.
+2. **To try checkout locally**, add to `.env.local` (never commit it):
+   - `CHECKOUT_ENABLED=true`
+   - `CHECKOUT_GATEWAY_SECRET`: run `node scripts/checkout-gateway-key.mjs`. It writes
+     this for you and prints an `insert` statement; run that in dev's SQL Editor, which
+     stores only the hash.
+   - Cloudflare's **testing** keys, for local use only:
+     `TURNSTILE_SITE_KEY=1x00000000000000000000AA`,
+     `TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA` and
+     `CHECKOUT_TURNSTILE_TESTING_KEYS=allow`. Without that last line, testing-key
+     answers are refused, as they always are on a host. The admin pages show a warning
+     while it is set.
+   - `CLIENT_IP_SOURCE=none`, so everyone shares one rate-limit bucket. That's fine
+     locally.
+3. In the admin **Settings** page, fill in the settings and tick **Take orders**. This
+   only affects dev. Real orders placed this way are dev data; cancel them in Orders.
+4. Untick **Take orders** (or remove `CHECKOUT_ENABLED`) when done.
+
+#### C. Hosted deployment (later, once hosting is decided)
+
+1. **Database:** stage A on the hosted database the deployment will use, with the
+   expiry job scheduled and healthy.
+2. **Build settings:** set the host's environment before building.
+   `NEXT_PUBLIC_SUPABASE_*` values are compiled into the build, server code included.
+3. **Checkout secret:** a separate `CHECKOUT_GATEWAY_SECRET` for each deployment,
+   registered by hash.
+4. **Turnstile:** a real widget for the site's hostname (never the testing keys, and never
+   `CHECKOUT_TURNSTILE_TESTING_KEYS`). Optionally set `TURNSTILE_ALLOWED_HOSTNAMES`.
+5. **Client IP:** `CLIENT_IP_SOURCE` from the host's own documentation. Netlify's
+   documentation (checked 2026-10-30) gives the IP only as `context.ip` /
+   `getContext().ip` and documents no header, so it is undecided for Netlify. Hosts
+   running several instances also need `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY`.
+6. **Before switching on:** run the manual checks on that deployment: place, confirm,
+   dispatch, fail, retry, deliver, expire, cancel, return, and the `/order#k=…` page.
+   Update `/delivery-returns`, the cart's demo note and the footer note.
+7. **Switch on:** `CHECKOUT_ENABLED=true`, then tick **Take orders**.
+
+**To stop taking orders at once:** untick **Take orders** (the database refuses new
+orders immediately), or unset `CHECKOUT_ENABLED`. Undoing the migrations isn't scripted.
+Before real orders exist it means dropping the new tables and functions and restoring the
+earlier `admin_save_product`; prefer switching off and fixing forward.
+
+### Decisions still open
+
+- **Delivery areas** (everywhere, or listed cities) and TCS's exact city and address
+  requirements.
+- **Free-delivery boundary:** "above Rs. 4,999" (includes Rs. 4,999.50; enter 4999.01)
+  or "Rs. 5,000 and above" (enter 5000). The setting is an inclusive minimum.
+- **Limits** (proposed, not approved):
+
+  | Setting | Proposal | Why |
+  | --- | --- | --- |
+  | Sizes per order | 10 | Covers a family order; most orders are one or two pairs |
+  | Pairs per order | 10 | Same |
+  | Pairs of one size per order | 4 | Siblings in kids' sizes; stops one order emptying a size |
+  | Unconfirmed orders per phone | 2 | Supplementary only (numbers can be invented) |
+  | Order attempts per connection, 10 min / day | 10 / 50 | Pakistani mobile networks share addresses between many customers (carrier NAT), so per-connection limits must be generous |
+  | Order-page lookups per connection, 10 min | 30 | Customers reload their order page |
+  | Price checks per connection, 10 min | 120 | Checkout re-checks prices when the cart or city changes; generous because many customers share an address |
+  | Order attempts per minute, whole shop | 30 | Emergency brake against a flood |
+
+- **Hosting** (Netlify is a candidate) and its client-IP handling.
+- **Selling unpublished products in the shop** (Settings, refused until decided).
+
+### Tests
+
+| Command | What | Needs |
+| --- | --- | --- |
+| `npm test` | Unit tests, including checkout input, keys, Turnstile, configuration, retries and the order flow with fakes | nothing |
+| `npm run test:db` | Every migration and every `supabase/tests/*.sql` file on **real PostgreSQL** (fresh database, and existing data first), plus races with many simultaneous connections (`db-tests/concurrency.test.ts`) | nothing: it starts a throwaway local PostgreSQL server (the `embedded-postgres` package, no Docker); or set `DB_TESTS_URL` (localhost only) and `ALLOW_DB_TESTS=1` |
+| `npx playwright test e2e/checkout.spec.ts` | Checkout while it is off: closed APIs, the order page, admin access | a running build |
+| `npm run test:e2e:checkout` | **The real checkout UI and Server Action through to stored orders and stock** (`e2e/checkout-local.spec.ts`): a successful order and its private page; a double click and two tabs at once; a lost response, then retry and refresh; changed details under the same key; spent and failing bot checks; abandoning a key before and after its order commits | internet access (Turnstile). It starts a throwaway PostgreSQL with every migration, a minimal stand-in for Supabase's HTTP API (`e2e/local-stack/postgrest-shim.mjs`, **not** PostgREST, Auth or Storage), a build in `.next-e2e` and three servers using Cloudflare's Turnstile **testing** keys |
+
+The races cover: 20 buyers for one pre-loved pair (exactly one order); 8 buyers for 5
+pairs; carts with the same sizes in opposite order; an online order against an in-store
+sale; the same key 10 times at once; the same key with different contents; abandoning a
+key while it is being placed; a lock timeout recovered by the retry helper; stale admin
+stock edits, description saves, price changes, unpublishing and delivery-fee changes
+during orders; the expiry job against a confirm, a second job and a new order; a whole
+expiry run failing; two cancels, cancel against expiry and against dispatch; the same
+return recorded twice; a failed delivery dispatched again by three admins at once. The
+stock ledger is reconciled after each. `db-tests/schedule-script.test.ts` checks
+`schedule_order_expiry.sql` against a stand-in for pg_cron (repeat-safe, exactly one
+job), not real pg_cron.
+
+### Checkout verification status (2026-10-30)
+
+- **Passed locally:**
+  - `npm test`: 147 tests.
+  - `npm run test:db` on PostgreSQL 17.10: 23 tests. That covers 401 SQL checks across
+    the five SQL files (125 in `orders_test.sql`, including a failed delivery dispatched
+    again twice), 18 race tests and 3 schedule-script tests.
+  - `npm run test:e2e:checkout`: 6 browser scenarios, on three separate runs.
+  - `e2e/checkout.spec.ts` against a local build.
+  - Lint, type-check and build.
+- **Shown to catch regressions:** three deliberate mutations of the orders migration were
+  each caught (a reused key accepted with different contents; skipping locked expired
+  orders; the expiry job not recording a failed run).
+- **Bugs found by these tests, and fixed:**
+  - selling counted pairs held by an expired order another transaction had locked;
+  - refreshing after a lost response showed "Your cart is empty" instead of the order.
+- **Not yet verified:**
+  - anything on a hosted Supabase project, including real PostgREST, Auth and **pg_cron
+    scheduling**;
+  - local Supabase (Docker not started);
+  - a real Turnstile widget on a real hostname;
+  - TCS booking;
+  - the host's client-IP header.
+
+## Enabling online payments
+
+Only cash on delivery is built. Card or wallet payments (for example JazzCash or
+Easypaisa) would need a payment provider, its webhook, and new payment statuses.
+Customer accounts, order emails and SMS aren't built either.
 
 ## Before launch
 
@@ -937,3 +1312,5 @@ To take real orders you'll need:
 - [ ] Any new admin write policies require `public.is_catalogue_admin()` (membership
       and `aal2`; see [Admin area](#admin-area))
 # store
+#   k h a r c h n s a v e  
+ 
