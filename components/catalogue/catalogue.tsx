@@ -147,7 +147,8 @@ export async function Catalogue({ searchParams }: { searchParams: Promise<RawSea
             {results.length > 0 ? (
               <>
                 <h2 className="sr-only">Products</h2>
-                <ProductGrid products={results} />
+                {/* The first row on a phone (two columns) holds the largest image. */}
+                <ProductGrid products={results} eagerCount={2} />
               </>
             ) : (
               <EmptyState query={query} facets={facets} total={total} />

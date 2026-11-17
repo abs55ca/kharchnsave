@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { updateTag } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
+import { recordUploadedPhoto } from "@/lib/admin/photo-registration";
 import { preparePhoto } from "@/lib/admin/photos";
 import {
   LIMITS,
@@ -225,36 +226,42 @@ export async function uploadProductPhoto(formData: FormData): Promise<PhotoUploa
     return { ok: false, error: "The photo couldn’t be uploaded to storage. Please try again." };
   }
 
-  // Record it. If that fails, remove the upload so nothing points nowhere
-  // (and nothing unreferenced is left behind, if Storage allows).
-  let newVersion: number;
-  try {
-    const { data, error } = await supabase.rpc("admin_add_product_image", {
-      p_product_id: productId,
-      p_expected_version: version,
-      p_image_id: imageId,
-      p_storage_path: path,
-      p_width: prepared.photo.width,
-      p_height: prepared.photo.height,
-      p_alt: alt,
-    });
-    if (error) {
-      await removeStoredPhotos(supabase, productId, [path]);
-      const problem = describeDbError(error);
-      if (problem.kind === "general") console.error("[admin] Recording a photo failed:", error.code);
-      return { ok: false, error: problem.message, conflict: problem.kind === "conflict" };
-    }
-    newVersion = data as number;
-  } catch (error) {
-    await removeStoredPhotos(supabase, productId, [path]);
-    console.error("[admin] Recording a photo failed:", (error as Error).name);
-    return { ok: false, error: "The photo couldn’t be saved right now. Please try again." };
+  // Record it, keyed by the image id: repeated until the database answers
+  // (lib/admin/photo-registration.ts). The upload is removed only when the
+  // database refused it; without an answer the photo may be recorded, so the
+  // file stays (an unused one stays private: README, "Product photos").
+  const outcome = await recordUploadedPhoto(
+    async () => {
+      const { data, error } = await supabase.rpc("admin_add_product_image", {
+        p_product_id: productId,
+        p_expected_version: version,
+        p_image_id: imageId,
+        p_storage_path: path,
+        p_width: prepared.photo.width,
+        p_height: prepared.photo.height,
+        p_alt: alt,
+      });
+      return { data: typeof data === "number" ? data : null, error };
+    },
+    () => removeStoredPhotos(supabase, productId, [path]),
+  );
+  if (outcome.kind === "refused") {
+    const problem = describeDbError(outcome.error);
+    if (problem.kind === "general") console.error("[admin] Recording a photo failed:", outcome.error.code);
+    return { ok: false, error: problem.message, conflict: problem.kind === "conflict" };
+  }
+  if (outcome.kind === "unknown") {
+    console.error("[admin] Recording a photo: no answer after", outcome.attempts, "attempts; the upload is kept.");
+    return {
+      ok: false,
+      error: "We couldn’t confirm whether it was saved. Reload the page: if the photo is there, it was saved; if not, upload it again.",
+    };
   }
 
   updateTag(CATALOGUE_TAG);
   return {
     ok: true,
-    version: newVersion,
+    version: outcome.version,
     photo: {
       id: imageId,
       previewSrc: adminPhotoSrc(productId, imageId),

@@ -20,7 +20,8 @@ export type OrderBody = {
 
 export type PlaceResult =
   | { result: "placed" | "existing"; order: CustomerOrderView }
-  | { result: "mismatch" | "abandoned" | "closed" | "phone_limit" }
+  // busy: the shop-wide order quota for this minute is used up (nothing ordered).
+  | { result: "mismatch" | "abandoned" | "closed" | "phone_limit" | "busy" }
   | { result: "limits"; max_lines: number; max_units: number; max_units_per_line: number }
   | { result: "quote_changed"; quote: Quote };
 

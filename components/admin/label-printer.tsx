@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import Link from "@/components/admin/admin-link";
 import { useState } from "react";
 import type { LabelName } from "@/lib/labels/name-fit";
 import { buildLabels, defaultQuantity, LABEL_QUANTITY_MAX, labelSize, parseQuantity, type LabelSpec } from "@/lib/labels/zpl";

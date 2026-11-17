@@ -113,7 +113,7 @@ $$;
 -- Sizes as the admin form sends them when it was opened just now: each
 -- existing size carries the stock and inventory version the form loaded
 -- (20261031120000_inventory_ledger.sql). Read with the caller's own access.
-create function pm_tests.form(product uuid, sizes jsonb) returns jsonb language sql as $$
+create function pm_tests.form(product uuid, sizes jsonb) returns jsonb language sql security definer as $$
   select coalesce(jsonb_agg(
     case when v.id is null then s
          else s || jsonb_build_object('stock_was', v.stock, 'inventory_version', v.inventory_version) end

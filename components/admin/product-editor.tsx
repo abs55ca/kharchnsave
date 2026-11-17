@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import Link from "@/components/admin/admin-link";
 import { useActionState, useId, useMemo, useRef, useState, useTransition } from "react";
 import {
   changeProductStatus,
@@ -1047,6 +1047,16 @@ function PhotosEditor({
                   />
                   Shows wear or a flaw
                 </label>
+                {/* The preview is a smaller copy; check wear on the stored photo. */}
+                <a
+                  href={photo.previewSrc.replace(/\?size=\w+$/, "")}
+                  target="_blank"
+                  rel="noopener"
+                  className="mt-2 inline-block text-xs font-semibold text-forest underline"
+                  aria-label={`View photo ${index + 1} at full size (opens in a new tab)`}
+                >
+                  View full size
+                </a>
                 <div className="mt-3 flex flex-wrap gap-2 text-sm">
                   <button type="button" onClick={() => move(index, -1)} disabled={index === 0} className="btn btn-outline h-8 px-2 text-xs disabled:opacity-50" aria-label={`Move photo ${index + 1} earlier`}>
                     Earlier

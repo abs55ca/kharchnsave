@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import Link from "@/components/admin/admin-link";
 import { randomUUID } from "node:crypto";
 import { Suspense } from "react";
 import { AccessNotice } from "@/components/admin/access-notice";

@@ -17,7 +17,9 @@ export function ProductGallery({ images, name }: { images: ProductImage[]; name:
           alt={current.alt}
           fill
           preload={index === 0}
-          sizes="(min-width: 1320px) 680px, (min-width: 1024px) 52vw, 100vw"
+          // Full width minus the page's gutters (.container-page) below the
+          // two-column layout: on a 390 px phone the photo is 358 px wide.
+          sizes="(min-width: 1320px) 680px, (min-width: 1024px) 52vw, (min-width: 768px) calc(100vw - 48px), calc(100vw - 32px)"
           className="object-cover"
           style={current.focus ? { objectPosition: current.focus } : undefined}
         />

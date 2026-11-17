@@ -9,9 +9,7 @@ import { useCart } from "./cart-provider";
 export function CartPageView() {
   const { lines, count, subtotal, hydrated } = useCart();
 
-  if (!hydrated) {
-    return <p className="py-10 text-sm text-muted">Loading your cart…</p>;
-  }
+  if (!hydrated) return <CartSkeleton />;
 
   if (lines.length === 0) {
     return (
@@ -67,6 +65,45 @@ export function CartPageView() {
           Continue to checkout
         </Link>
       </section>
+    </div>
+  );
+}
+
+/**
+ * Shown until the saved cart has been read on this device: the layout of a
+ * one-item cart, at the same sizes, so the page doesn't jump when the cart
+ * appears (more items still push the summary down on phones).
+ */
+function CartSkeleton() {
+  const bar = "rounded bg-cream";
+  return (
+    <div aria-busy="true" className="grid gap-8 lg:grid-cols-[1fr_360px] lg:items-start">
+      <p role="status" className="sr-only">
+        Loading your cart…
+      </p>
+      <div aria-hidden="true">
+        <div className="flex gap-4 border-y border-line py-4">
+          <div className={`size-28 shrink-0 ${bar}`} />
+          <div className="flex-1 space-y-2 pt-0.5">
+            <div className={`h-3 w-20 ${bar}`} />
+            <div className={`h-4 w-3/4 ${bar}`} />
+            <div className={`h-3 w-1/2 ${bar}`} />
+            <div className={`mt-6 h-8 w-24 ${bar}`} />
+          </div>
+        </div>
+        <div className={`mt-4 h-5 w-32 ${bar}`} />
+      </div>
+      <div aria-hidden="true" className="space-y-4 rounded-lg border border-line p-5">
+        <div className={`h-6 w-36 ${bar}`} />
+        <div className="space-y-2">
+          <div className={`h-5 ${bar}`} />
+          <div className={`h-9 border-t border-line pt-3`}>
+            <div className={`h-6 ${bar}`} />
+          </div>
+        </div>
+        <div className={`h-14 rounded-md ${bar}`} />
+        <div className={`h-12 rounded-md ${bar}`} />
+      </div>
     </div>
   );
 }

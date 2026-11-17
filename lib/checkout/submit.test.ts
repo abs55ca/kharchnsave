@@ -93,6 +93,24 @@ describe("submitOrder", () => {
     expect(d.place).not.toHaveBeenCalled();
   });
 
+  it("a refused Turnstile check never reaches the order (so it can't use up the shop-wide quota)", async () => {
+    for (const reason of ["invalid", "expired", "unavailable"] as const) {
+      const d = deps({ verifyTurnstile: vi.fn(async () => ({ ok: false as const, reason })) });
+      await submitOrder(input(), d);
+      expect(d.registerAttempt).toHaveBeenCalledOnce();
+      expect(d.place).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a retry of a placed order returns it without a new attempt, Turnstile or placing", async () => {
+    const d = deps({ resolve: vi.fn(async () => ok<ResolveResult>({ state: "placed", matches: true, order: ORDER })) });
+    expect(await submitOrder(input(), d)).toEqual({ status: "placed", order: ORDER });
+    expect(d.registerAttempt).not.toHaveBeenCalled();
+    expect(d.verifyTurnstile).not.toHaveBeenCalled();
+    expect(d.place).not.toHaveBeenCalled();
+    expect(d.onPlaced).not.toHaveBeenCalled();
+  });
+
   it("an expired or used Turnstile token asks for a new check and places nothing", async () => {
     const d = deps({ verifyTurnstile: vi.fn(async () => ({ ok: false as const, reason: "expired" as const })) });
     expect(await submitOrder(input(), d)).toEqual({ status: "verify_again" });
@@ -111,6 +129,7 @@ describe("submitOrder", () => {
       [{ result: "mismatch" }, "reused"],
       [{ result: "closed" }, "closed"],
       [{ result: "phone_limit" }, "phone_limit"],
+      [{ result: "busy" }, "busy"],
       [{ result: "abandoned" }, "abandoned"],
       [{ result: "limits", max_lines: 5, max_units: 6, max_units_per_line: 4 }, "limits"],
       [{ result: "quote_changed", quote: { exact: false } as never }, "quote_changed"],

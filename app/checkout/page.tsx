@@ -3,6 +3,7 @@ import { connection } from "next/server";
 import { Suspense } from "react";
 import { CheckoutHandoff } from "@/components/cart/checkout-handoff";
 import { CheckoutForm } from "@/components/checkout/checkout-form";
+import { CheckoutSkeleton } from "@/components/checkout/checkout-skeleton";
 import { getCheckoutConfig } from "@/lib/checkout/config";
 
 export const metadata: Metadata = {
@@ -14,7 +15,7 @@ export default function CheckoutPage() {
   return (
     <div className="container-page py-8 md:py-10">
       <h1 className="mb-6 text-2xl font-extrabold tracking-tight md:text-3xl">Checkout</h1>
-      <Suspense fallback={<p className="py-10 text-sm text-muted">Loading…</p>}>
+      <Suspense fallback={<CheckoutSkeleton />}>
         <Checkout />
       </Suspense>
     </div>

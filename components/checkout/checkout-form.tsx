@@ -27,6 +27,7 @@ import type { SubmitResult } from "@/lib/checkout/submit";
 import type { CustomerOrderView, Quote, QuoteLine } from "@/lib/checkout/types";
 import { formatPrice } from "@/lib/format";
 import { useCart } from "@/components/cart/cart-provider";
+import { CheckoutSkeleton, QuoteSkeleton } from "./checkout-skeleton";
 import { TurnstileWidget } from "./turnstile-widget";
 
 const INPUT =
@@ -52,6 +53,7 @@ const MESSAGES: Partial<Record<SubmitResult["status"], string>> = {
   phone_limit:
     "There are already orders waiting for confirmation on this phone number. We’ll contact you about them before you order again.",
   rate_limited: "Too many attempts from this connection. Please wait a few minutes and try again.",
+  busy: "We’re receiving a lot of orders right now. Nothing was ordered yet: please try again in a minute.",
   verify_again: "The security check expired. Complete it again, then place your order.",
   verify_failed: "The security check didn’t pass. Complete it again, then place your order.",
   verification_unavailable:
@@ -67,7 +69,7 @@ type Settled = { kind: "placed"; order: CustomerOrderView; key: string } | null;
 /** The checkout, once the saved cart has been read on this device. */
 export function CheckoutForm({ siteKey }: { siteKey: string }) {
   const { lines, hydrated } = useCart();
-  if (!hydrated) return <p className="py-10 text-sm text-muted">Loading your cart…</p>;
+  if (!hydrated) return <CheckoutSkeleton />;
   if (lines.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-line px-6 py-14 text-center">
@@ -368,7 +370,12 @@ function CheckoutFlow({ siteKey }: { siteKey: string }) {
               : "We couldn’t check prices and stock just now. Check your connection."}
           </p>
         ) : !quote ? (
-          <p className="mt-3 text-sm text-muted">Checking prices and stock…</p>
+          <>
+            <p className="sr-only" role="status">
+              Checking prices and stock…
+            </p>
+            <QuoteSkeleton lines={lines.length} />
+          </>
         ) : (
           <QuoteSummary quote={quote} lines={lines} changed={changed.length > 0} onAccept={acceptChanges} />
         )}

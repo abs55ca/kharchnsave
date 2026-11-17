@@ -76,7 +76,7 @@ function toScanProduct(row: ProductJson): ScanProduct {
     pricePaisa: row.price_paisa,
     salePricePaisa: row.sale_price_paisa ?? null,
     photo: photo
-      ? { src: photo.storage_path ? adminPhotoSrc(row.id, photo.id) : (photo.src ?? ""), alt: photo.alt }
+      ? { src: photo.storage_path ? adminPhotoSrc(row.id, photo.id, "thumb") : (photo.src ?? ""), alt: photo.alt }
       : null,
     units: row.units.map((unit) => ({
       variantId: unit.variant_id,

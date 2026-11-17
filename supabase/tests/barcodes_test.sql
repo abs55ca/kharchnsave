@@ -96,8 +96,11 @@ create function bc_tests.v(key text) returns integer language sql as $$
 $$;
 
 -- Sizes as the admin form sends them when it was opened just now (stock and
--- inventory version as loaded; 20261031120000_inventory_ledger.sql).
-create function bc_tests.form(product uuid, sizes jsonb) returns jsonb language sql as $$
+-- inventory version as loaded; 20261031120000_inventory_ledger.sql). Reads as
+-- the owner: the admin pages load these through admin_get_products, since
+-- signed-in sessions can't read inventory_version directly
+-- (20261117120400_restrict_internal_columns.sql).
+create function bc_tests.form(product uuid, sizes jsonb) returns jsonb language sql security definer as $$
   select coalesce(jsonb_agg(
     case when v.id is null then s
          else s || jsonb_build_object('stock_was', v.stock, 'inventory_version', v.inventory_version) end
@@ -185,10 +188,13 @@ select bc_tests.returns('API roles cannot execute the barcode helpers or trigger
 select bc_tests.returns('anon cannot execute the scan lookup',
   $q$ select string_agg(f, ', ') from unnest(array['public.admin_scan_lookup(text)', 'public.admin_scan_product(uuid, uuid)']) f
       where has_function_privilege('anon', f, 'EXECUTE') $q$, '');
-select bc_tests.returns('the scan lookup is STABLE (it cannot write) and runs with the caller''s rights',
-  $q$ select string_agg(proname || ' ' || provolatile::text || ' ' || prosecdef, ', ' order by proname) from pg_proc
+-- SECURITY DEFINER since 20261117120200_internal_columns_admin_reads.sql
+-- (signed-in users can no longer read label_name directly); both still
+-- refuse anyone but a verified admin (checked below).
+select bc_tests.returns('the scan lookup is STABLE (it cannot write), runs as the owner, with an empty search_path',
+  $q$ select string_agg(proname || ' ' || provolatile::text || ' ' || prosecdef || ' ' || array_to_string(proconfig, ';'), ', ' order by proname) from pg_proc
       where oid in ('public.admin_scan_lookup(text)'::regprocedure, 'public.admin_scan_product(uuid, uuid)'::regprocedure) $q$,
-  'admin_scan_lookup s false, admin_scan_product s false');
+  'admin_scan_lookup s true search_path="", admin_scan_product s true search_path=""');
 -- Our migrations never create event-trigger functions; Supabase's platform
 -- adds some to public (e.g. rls_auto_enable(), with search_path = pg_catalog).
 -- Every other SECURITY DEFINER function there, including any we add later,

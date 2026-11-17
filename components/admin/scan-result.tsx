@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "@/components/admin/admin-link";
 import type { ScanInput } from "@/lib/barcodes/code";
 import type { ScanProduct, ScanResult, ScanUnit } from "@/lib/admin/scan";
 import { labelSize } from "@/lib/labels/zpl";

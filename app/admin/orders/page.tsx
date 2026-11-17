@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import Link from "@/components/admin/admin-link";
 import { Suspense } from "react";
 import { AccessNotice } from "@/components/admin/access-notice";
 import { AdminNav } from "@/components/admin/admin-nav";

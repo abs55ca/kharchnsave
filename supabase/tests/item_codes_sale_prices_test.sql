@@ -102,7 +102,7 @@ returns jsonb language sql as $$
 $$;
 
 -- Sizes as a form opened just now sends them.
-create function sp_tests.form(product uuid) returns jsonb language sql as $$
+create function sp_tests.form(product uuid) returns jsonb language sql security definer as $$
   select coalesce(jsonb_agg(jsonb_build_object('size', v.size_eu, 'stock', v.stock,
     'stock_was', v.stock, 'inventory_version', v.inventory_version) order by v.size_eu), '[]'::jsonb)
   from public.product_variants v where v.product_id = product;

@@ -107,8 +107,20 @@ create function ord_tests.ver(n integer) returns integer language sql as $$
   select version from public.orders where id = ord_tests.order_id(n);
 $$;
 
-create function ord_tests.stock(sku text) returns text language sql as $$
+create function ord_tests.stock(sku text) returns text language sql security definer as $$
   select stock || '/' || reserved from public.product_variants where product_variants.sku = stock.sku;
+$$;
+
+-- A size's inventory version, and the sizes as the product form loads them.
+-- Read as the owner: signed-in sessions get these through admin_get_products
+-- (20261117120400_restrict_internal_columns.sql).
+create function ord_tests.inventory_version(sku text) returns bigint language sql security definer as $$
+  select v.inventory_version from public.product_variants v where v.sku = inventory_version.sku;
+$$;
+create function ord_tests.form(sku_prefix text) returns text language sql security definer as $$
+  select jsonb_agg(jsonb_build_object('size', size_eu, 'stock', stock, 'stock_was', stock,
+    'inventory_version', inventory_version) order by size_eu)::text
+  from public.product_variants where sku like sku_prefix || '%';
 $$;
 
 create function ord_tests.req(n integer) returns uuid language sql as $$
@@ -641,7 +653,7 @@ reset role;
 
 set local role authenticated;
 select ord_tests.as_admin();
-select set_config('ord.v0', (select inventory_version::text from public.product_variants where sku = 'TEST-ORD-NEW-20'), true);
+select set_config('ord.v0', ord_tests.inventory_version('TEST-ORD-NEW-20')::text, true);
 select set_config('ord.s0', (select stock::text from public.product_variants where sku = 'TEST-ORD-NEW-20'), true);
 select set_config('ord.size_id', (select id::text from public.product_variants where sku = 'TEST-ORD-NEW-20'), true);
 select ord_tests.returns('adjust stock with the current version',
@@ -650,15 +662,13 @@ select ord_tests.returns('adjust: the same request again changes nothing',
   $q$ select (r ->> 'applied') || ' ' || (r ->> 'stock') from (select public.admin_adjust_stock(current_setting('ord.size_id')::uuid,
         current_setting('ord.v0')::bigint, 4, ord_tests.req(40)) r) x $q$, 'false 4');
 select public.admin_adjust_stock(current_setting('ord.size_id')::uuid,
-  (select inventory_version from public.product_variants where sku = 'TEST-ORD-NEW-20'), current_setting('ord.s0')::integer, ord_tests.req(41));
+  ord_tests.inventory_version('TEST-ORD-NEW-20'), current_setting('ord.s0')::integer, ord_tests.req(41));
 select ord_tests.throws('adjust: stock back at its old value but changed in between (A-B-A) is still a conflict',
   $q$ select public.admin_adjust_stock(current_setting('ord.size_id')::uuid, current_setting('ord.v0')::bigint, 3, ord_tests.req(42)) $q$,
   'PT409', 'stock_changed');
 
 -- The product form, opened before an order arrived.
-select set_config('ord.form', (select jsonb_agg(jsonb_build_object('size', size_eu, 'stock', stock, 'stock_was', stock,
-  'inventory_version', inventory_version) order by size_eu)::text
-  from public.product_variants where sku like 'TEST-ORD-NEW-%'), true);
+select set_config('ord.form', ord_tests.form('TEST-ORD-NEW-'), true);
 select set_config('ord.pv', (select version::text from public.products where item_code = 'TEST-ORD-NEW'), true);
 reset role;
 set local role anon;

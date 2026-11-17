@@ -19,11 +19,14 @@ import type { CustomerOrderView, Quote } from "./types";
  * 2. Has this checkout key already placed an order? If so, and the contents
  *    are the same, that order is the answer (a retry after a lost response).
  *    The same key with different contents is refused, never accepted.
- * 3. Count the attempt against the rate limits.
+ * 3. Count the attempt against this visitor's rate limits (cheap, before
+ *    Turnstile; a refusal stops here).
  * 4. Verify the Turnstile token. An expired or used token asks the customer to
  *    redo the check; the key stays the same, so no duplicate can result.
  * 5. Place the order. The database recalculates everything and either places
- *    it or explains what changed.
+ *    it or explains what changed. Only a new order uses up the shop-wide
+ *    quota; when that is full the answer is "busy" and the same key can be
+ *    sent again (20261117120100_checkout_quota_quotes_and_phone_limit.sql).
  *
  * When the database can't be reached and we can't tell whether the order was
  * placed, the result is "unknown": the browser keeps the key and asks again.
@@ -51,6 +54,7 @@ export type SubmitResult =
         | "reused"
         | "abandoned"
         | "phone_limit"
+        | "busy"
         | "rate_limited"
         | "verify_again"
         | "verify_failed"
@@ -133,6 +137,7 @@ export async function submitOrder(input: SubmitInput, deps: SubmitDeps): Promise
     case "abandoned":
     case "closed":
     case "phone_limit":
+    case "busy":
       return { status: result.result };
     default:
       return { status: "error" };

@@ -11,7 +11,12 @@ import { ProductPrice } from "./product-price";
 export const PRODUCT_GRID_SIZES =
   "(min-width: 1280px) 290px, (min-width: 1024px) 30vw, (min-width: 768px) 33vw, 50vw";
 
-export function ProductCard({ product }: { product: Product }) {
+/**
+ * `eager`: the card is in the first row the page shows, where the largest
+ * image (LCP) usually is: load its photo at once, at high priority, instead
+ * of lazily. Every other card stays lazy.
+ */
+export function ProductCard({ product, eager = false }: { product: Product; eager?: boolean }) {
   const image = product.images[0];
   const inStock = isInStock(product);
 
@@ -23,6 +28,7 @@ export function ProductCard({ product }: { product: Product }) {
           alt={image.alt}
           fill
           sizes={PRODUCT_GRID_SIZES}
+          {...(eager ? { loading: "eager" as const, fetchPriority: "high" as const } : {})}
           className={`object-cover transition-transform duration-300 motion-safe:group-hover:scale-[1.03] ${
             inStock ? "" : "opacity-60 grayscale-[35%]"
           }`}
@@ -59,12 +65,13 @@ export function ProductCard({ product }: { product: Product }) {
   );
 }
 
-export function ProductGrid({ products }: { products: Product[] }) {
+/** `eagerCount`: how many leading cards load their photo eagerly (see ProductCard). */
+export function ProductGrid({ products, eagerCount = 0 }: { products: Product[]; eagerCount?: number }) {
   return (
     <ul className="grid grid-cols-2 gap-x-3 gap-y-7 sm:gap-x-4 md:grid-cols-3 xl:grid-cols-4">
-      {products.map((product) => (
+      {products.map((product, index) => (
         <li key={product.id}>
-          <ProductCard product={product} />
+          <ProductCard product={product} eager={index < eagerCount} />
         </li>
       ))}
     </ul>

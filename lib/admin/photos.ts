@@ -17,7 +17,17 @@ export const PHOTO_LIMITS = {
   maxPixels: 40_000_000,
   /** Longest side of the stored copy. */
   storedMaxSide: 2000,
+  /**
+   * WebP quality of the stored copy. Chosen on 24 product photos (2026-11-17):
+   * against 85, 80 is 20% smaller on average (201 KB vs 252 KB at 2,000 px)
+   * with stitching, texture and wear still sharp at 2x zoom; 78 began to
+   * smooth dark fabric. Shoppers get resized copies from next/image anyway.
+   */
+  storedQuality: 80,
 } as const;
+
+/** WebP quality of the admin previews made from the stored copy (never stored). */
+const PREVIEW_QUALITY = { small: 70, large: 75 } as const;
 
 type Format = "jpeg" | "png" | "webp";
 
@@ -74,10 +84,22 @@ export async function preparePhoto(file: unknown): Promise<{ ok: true; photo: Pr
     const { data, info } = await sharp(bytes, options)
       .rotate()
       .resize({ width: PHOTO_LIMITS.storedMaxSide, height: PHOTO_LIMITS.storedMaxSide, fit: "inside", withoutEnlargement: true })
-      .webp({ quality: 85 })
+      .webp({ quality: PHOTO_LIMITS.storedQuality })
       .toBuffer({ resolveWithObject: true });
     return { ok: true, photo: { data, width: info.width, height: info.height } };
   } catch {
     return { ok: false, error: "That file couldn’t be read as a photo. It may be damaged; try exporting it again." };
   }
+}
+
+/**
+ * A smaller WebP copy of a stored photo (already checked and re-encoded by
+ * preparePhoto) for the admin previews, at most `maxSide` pixels on its
+ * longest side. Made on request and never stored.
+ */
+export async function previewPhoto(stored: Uint8Array, maxSide: number): Promise<Buffer> {
+  return sharp(stored, { limitInputPixels: PHOTO_LIMITS.maxPixels })
+    .resize({ width: maxSide, height: maxSide, fit: "inside", withoutEnlargement: true })
+    .webp({ quality: maxSide <= 256 ? PREVIEW_QUALITY.small : PREVIEW_QUALITY.large })
+    .toBuffer();
 }

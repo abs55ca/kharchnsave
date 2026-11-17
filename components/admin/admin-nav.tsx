@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "@/components/admin/admin-link";
 import { SignOutButton } from "./sign-out-button";
 
 const LINKS = [

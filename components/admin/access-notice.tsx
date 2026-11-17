@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "@/components/admin/admin-link";
 import type { AdminAccess } from "@/lib/auth/admin";
 import { AdminNotice } from "./admin-notice";
 import { SignOutButton } from "./sign-out-button";

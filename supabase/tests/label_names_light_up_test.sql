@@ -80,18 +80,25 @@ create function lu_tests.v(key text) returns integer language sql as $$
 $$;
 
 -- Sizes as a form opened just now sends them (stock and inventory version as loaded).
-create function lu_tests.form(product uuid) returns jsonb language sql as $$
+create function lu_tests.form(product uuid) returns jsonb language sql security definer as $$
   select coalesce(jsonb_agg(jsonb_build_object('size', v.size_eu, 'stock', v.stock,
     'stock_was', v.stock, 'inventory_version', v.inventory_version) order by v.size_eu), '[]'::jsonb)
   from public.product_variants v where v.product_id = product;
 $$;
 
 -- Stock, held pairs and inventory versions of a product's sizes, and its ledger rows.
-create function lu_tests.inventory(product uuid) returns text language sql as $$
+create function lu_tests.inventory(product uuid) returns text language sql security definer as $$
   select string_agg(trim_scale(v.size_eu) || ':' || v.stock || '/' || v.reserved || '/v' || v.inventory_version, ' ' order by v.size_eu)
     || ' ledger ' || (select count(*) from public.stock_movements m join public.product_variants x on x.id = m.variant_id
                       where x.product_id = product)
   from public.product_variants v where v.product_id = product;
+$$;
+
+-- A product as the admin editor reads it (with the caller's rights): signed-in
+-- sessions can't read label_name directly since
+-- 20261117120400_restrict_internal_columns.sql.
+create function lu_tests.admin_row(key text) returns jsonb language sql as $$
+  select public.admin_get_products(array[lu_tests.p(key)]) -> 0;
 $$;
 
 grant usage on schema lu_tests to anon, authenticated;
@@ -211,15 +218,16 @@ select set_config('lu.kids', public.admin_create_product(
     '{"label_name": "Navy/Grey Trainers", "light_up": true, "light_up_condition": "not_checked", "light_up_activation": "Soles flash when walking."}'),
   '[{"size": 30, "stock": 3}, {"size": 31, "stock": 2}]') ->> 'id', true);
 select lu_tests.returns('create: saves the label name and light-up details; the product name is untouched',
-  $q$ select name || ' / ' || label_name || ' / ' || light_up || ' / ' || light_up_condition || ' / ' || light_up_activation
-      from public.products where id = lu_tests.p('kids') $q$,
+  $q$ select (r ->> 'name') || ' / ' || (r ->> 'label_name') || ' / ' || (r ->> 'light_up') || ' / ' || (r ->> 'light_up_condition')
+             || ' / ' || (r ->> 'light_up_activation')
+      from (select lu_tests.admin_row('kids') r) x $q$,
   'Kids Navy and Grey Double-Strap Sports Trainers / Navy/Grey Trainers / true / not_checked / Soles flash when walking.');
 
 select set_config('lu.plain', public.admin_create_product(lu_tests.fields('TEST-LU-PLAIN', 'test-lu-plain'),
   '[{"size": 32, "stock": 1}]') ->> 'id', true);
 select lu_tests.returns('create: without the new fields, nothing is recorded (no label name, light-up not recorded)',
-  $q$ select coalesce(label_name, 'null') || ' / ' || coalesce(light_up::text, 'null')
-      from public.products where id = lu_tests.p('plain') $q$, 'null / null');
+  $q$ select coalesce(r ->> 'label_name', 'null') || ' / ' || coalesce(r ->> 'light_up', 'null')
+      from (select lu_tests.admin_row('plain') r) x $q$, 'null / null');
 
 select lu_tests.throws('admin: can''t change the label name directly, only through the save function',
   $q$ update public.products set label_name = 'Direct' where id = lu_tests.p('kids') $q$, '42501');
@@ -243,8 +251,8 @@ select public.admin_save_product(lu_tests.p('kids'), current_setting('lu.opened'
     '{"label_name": "Light-up Trainers", "light_up": true, "light_up_condition": "both_work", "light_up_activation": null}'),
   current_setting('lu.form')::jsonb, '[]');
 select lu_tests.returns('save: label name and light-up details change, the activation can be cleared',
-  $q$ select label_name || ' / ' || light_up_condition || ' / ' || coalesce(light_up_activation, 'null')
-      from public.products where id = lu_tests.p('kids') $q$, 'Light-up Trainers / both_work / null');
+  $q$ select (r ->> 'label_name') || ' / ' || (r ->> 'light_up_condition') || ' / ' || coalesce(r ->> 'light_up_activation', 'null')
+      from (select lu_tests.admin_row('kids') r) x $q$, 'Light-up Trainers / both_work / null');
 select lu_tests.returns('save: the product version goes up (conflict protection still works)',
   $q$ select (lu_tests.v('kids') = current_setting('lu.opened')::integer + 1)::text $q$, 'true');
 select lu_tests.returns('save: stock, held pairs, inventory versions and the ledger are untouched',
@@ -258,7 +266,8 @@ select lu_tests.throws('save: the old version is refused, as before',
 select public.admin_save_product(lu_tests.p('kids'), lu_tests.v('kids'),
   lu_tests.fields('TEST-LU-KIDS', 'test-lu-kids') || '{"description": "Older caller"}', lu_tests.form(lu_tests.p('kids')), '[]');
 select lu_tests.returns('save without the new fields: label name and light-up details are kept',
-  $q$ select description || ' / ' || label_name || ' / ' || light_up_condition from public.products where id = lu_tests.p('kids') $q$,
+  $q$ select (r ->> 'description') || ' / ' || (r ->> 'label_name') || ' / ' || (r ->> 'light_up_condition')
+      from (select lu_tests.admin_row('kids') r) x $q$,
   'Older caller / Light-up Trainers / both_work');
 
 -- Back to "not recorded" and no label name.
@@ -266,7 +275,8 @@ select public.admin_save_product(lu_tests.p('kids'), lu_tests.v('kids'),
   lu_tests.fields('TEST-LU-KIDS', 'test-lu-kids', '{"label_name": null, "light_up": null, "light_up_condition": null, "light_up_activation": null}'),
   lu_tests.form(lu_tests.p('kids')), '[]');
 select lu_tests.returns('save: the label name and light-up answer can be cleared',
-  $q$ select coalesce(label_name, 'null') || ' / ' || coalesce(light_up::text, 'null') from public.products where id = lu_tests.p('kids') $q$,
+  $q$ select coalesce(r ->> 'label_name', 'null') || ' / ' || coalesce(r ->> 'light_up', 'null')
+      from (select lu_tests.admin_row('kids') r) x $q$,
   'null / null');
 select lu_tests.throws('save: light-up Yes without a condition is refused',
   $q$ select public.admin_save_product(lu_tests.p('kids'), lu_tests.v('kids'),

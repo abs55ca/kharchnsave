@@ -194,6 +194,12 @@ Notes:
 | `supabase/migrations/20261101120000_label_names_and_light_up.sql` | Optional label name (admin-only; the publishable key reads products column by column without it) and light-up soles (not recorded / no / yes with a condition); the admin product functions save them without touching stock |
 | `supabase/migrations/20261101130000_item_codes_and_sale_prices.sql` | Automatic item codes (`ITEM-000001`, from their own sequence) and optional sale prices; checkout, in-store sales and order snapshots charge the sale price |
 | `supabase/migrations/20261116120000_product_writes_through_functions_only.sql` | Products and photos change only through the admin functions: removes verified admins' direct insert/update/delete grants on `products` and `product_images` (which skipped the version check), and makes `admin_add_product_image` and `admin_set_publication_status` SECURITY DEFINER like the other admin product functions |
+| `supabase/migrations/20261117120000_function_default_privileges.sql` | New functions are executable only by the roles they are explicitly granted to: removes the migration role's global `EXECUTE … TO PUBLIC` default and Supabase's `anon`/`authenticated` default in `public` (the old `private`-schema default had no effect) |
+| `supabase/migrations/20261117120100_checkout_quota_quotes_and_phone_limit.sql` | Checkout: the shop-wide order quota is taken only by new orders, inside `place_cod_order` (refused, retried and bot attempts can't use it up; result `busy`); online quotes say nothing about draft, archived or unknown SKUs; the per-phone open-order limit holds under simultaneous orders (advisory lock per phone; expired holds don't count) |
+| `supabase/migrations/20261117120200_internal_columns_admin_reads.sql` | Step 1 of 2 ("expand"): verified admins read the label name, held stock and inventory versions through `admin_get_products` and the scan functions. Changes no grants, so the previous version of the site keeps working |
+| `supabase/migrations/20261117120300_idempotent_photo_registration.sql` | `admin_add_product_image` is keyed by the image id: each registration's original request and resulting version are kept in `private.photo_registrations`; a retry with the identical request gets the original version back, anything else is refused; a retry waits for a registration still in progress |
+| `supabase/migrations/20261117120400_restrict_internal_columns.sql` | Step 2 of 2 ("contract"), applied last (stage D): signed-in users read products and sizes with the same columns as visitors (no `label_name`, `reserved`, `inventory_version`) |
+| `db-tests/hardening.test.ts` | Regression tests for the four migrations above on real PostgreSQL: quota, quotes, the permission matrix, the per-phone limit under concurrency, default privileges, photo registration retries |
 | `supabase/tests/item_codes_sale_prices_test.sql` | Tests for code assignment and collisions, existing codes, the sale price rules, quotes, free delivery, orders and in-store sales at sale prices, and historical orders. Rolls back and puts its counters back |
 | `supabase/tests/label_names_light_up_test.sql` | Tests for the label name and light-up rules, who can read the label name, and that saving them leaves stock, held pairs, inventory versions and the ledger alone. Rolls back |
 | `supabase/tests/orders_test.sql` | Tests for order permissions, the gateway secret, checkout, retries, hold expiry, admin actions, delivery and payment, returns, in-store sales, stale stock edits and ledger reconciliation. Rolls back |
@@ -211,7 +217,9 @@ What the schema enforces:
 - **Publication** (`draft` / `published` / `archived`) is separate from **item status**
   (`new` / `preloved`). Only published products, and their sizes and photos, are visible.
 - **Access:** RLS is enabled on all three tables. Visitors, and signed-in users who
-  aren't verified admins, can only read published products. Only a verified admin
+  aren't verified admins, can only read published products, and only the storefront's
+  columns (never the label name, held stock or inventory versions; verified admins read
+  those through `admin_get_products`). Only a verified admin
   (membership **and** a two-step-verified session) can write, through the policies added
   in `20261029120000_admin_product_management.sql`. Nobody can delete a product through
   the API.
@@ -526,7 +534,9 @@ The server checks these first, for clear messages, and the database enforces the
   most 40 megapixels. The server checks the file's actual contents (not its name), decodes
   the whole image, and refuses anything else, including HEIC, GIF, SVG, animated and
   damaged files (`lib/admin/photos.ts`).
-- **Stored:** re-encoded as WebP, at most 2,000 pixels on the longest side, with all
+- **Stored:** re-encoded as WebP (quality 80: on 24 product photos, 20% smaller than
+  quality 85 with stitching and wear still sharp at 2x zoom), at most 2,000 pixels on
+  the longest side, with all
   metadata removed (camera details and GPS location), in the **private** Storage bucket
   `product-photos` at `<product id>/<image id>.webp`. The database stores that path
   (`product_images.storage_path`), never a URL. Existing fixture photos keep their
@@ -534,7 +544,10 @@ The server checks these first, for clear messages, and the database enforces the
 - **Who can see them:** Storage's rules let shoppers read a photo only while it belongs to
   a published product. Draft, archived and unused photos are private to verified admins.
   Admins preview them through `/admin/products/<id>/photos/<image id>`, which checks
-  access on every request and is never cached.
+  access on every request and is never cached. The list, scan page and editor ask it for
+  a smaller copy made on request (`?size=thumb`, 256 px, about 4 KB; `?size=preview`,
+  720 px, about 30 KB) instead of the stored photo (about 250 KB); **View full size** in
+  the editor opens the stored photo.
 - **Delivery to shoppers:** `/product-photos/<product id>/<image id>.webp` reads the photo
   with the public key and caches it with the catalogue (same `catalogue` tag), and
   `next/image` optimises it like any other local image.
@@ -555,7 +568,17 @@ The server checks these first, for clear messages, and the database enforces the
 database, so a product never points at a missing file:
 
 - If the upload fails, nothing is recorded.
-- If recording fails (for example, someone else saved first), the upload is deleted again.
+- If the database refuses to record it (for example, someone else saved first), the
+  upload is deleted again.
+- If the answer is lost (a network error after the database may have committed), the
+  site asks again with the same image id until the database answers: a repeat of the
+  identical request (same product, expected version, path, dimensions and alt text, as
+  first sent) returns the version that registration produced, never a later one, so if
+  another admin saved in between, the editor's next save is refused as a conflict rather
+  than overwriting their change; a repeat waits for a first attempt still in progress
+  (`lib/admin/photo-registration.ts`). If no answer comes, the upload is **kept** and the
+  admin is asked to reload: deleting it could leave a recorded photo pointing at nothing.
+  An upload that turns out unrecorded is an unused file (see below).
 - When a photo is removed from a listing, its file is deleted after the save succeeds.
 
 If one of those deletions fails, an unused file is left in the bucket. It stays private
@@ -1078,7 +1101,11 @@ pairs come back on sale only when the parcel is received and each pair is checke
 ### Locking and retries
 
 Every operation takes its locks in one order: the request key (an advisory lock), then
-`shop_settings`, then orders, then products, then sizes, each by id. Placing an order
+(placing an order only) the phone number (another advisory lock, so two orders from one
+number can't both pass the open-order limit), then `shop_settings`, then orders, then
+products, then sizes, each by id, and last the shop-wide quota row, held only for the
+final insert. Customers with different numbers never wait for each other's phone
+lock. Placing an order
 holds the products it sells for reading, so a price change, unpublishing or a delivery-fee
 change either waits for it or makes it see the new values (and return "quote changed").
 The stock check and the order are one transaction. Lock waits are capped (2 s for orders,
@@ -1120,9 +1147,15 @@ An unconfirmed order holds its pairs until `hold_expires_at` (24 hours). Then:
   writes order tables or sizes directly; only the functions do. Internal helpers and
   private tables live in the `private` schema, which API roles can't use at all.
 - **Bot protection:** Cloudflare Turnstile, checked on the server and bound to the order
-  attempt; shared per-connection and whole-shop rate limits in the database; per-order
+  attempt; per-connection rate limits in the database, counted before Turnstile (a
+  refusal stops there); a whole-shop "orders per minute" quota that only new orders use
+  up, taken inside `place_cod_order` after every other check (so refused attempts, bots
+  failing Turnstile and retries of a placed order can't exhaust it; when it is full the
+  customer sees "we're receiving a lot of orders" and nothing is ordered); per-order
   limits; hold expiry; and a per-phone limit, which is only supplementary because
   anyone can type a different number. If Turnstile can't be reached, orders are refused.
+- **Quotes** show a draft, archived or unknown SKU as just "unavailable", with no name,
+  brand, size, condition or price (in-store quotes for verified admins are unchanged).
 - **The order link** `/order#k=…` carries a 32-byte random key in the part after `#`,
   which browsers never send to servers; the page posts it in the request body. The
   database stores only its hash. An order number plus phone number is never enough. The
@@ -1150,7 +1183,9 @@ In the dev project's SQL Editor:
    `supabase/migrations/20261031140000_settings_where_clauses.sql`, then
    `supabase/migrations/20261101120000_label_names_and_light_up.sql`, then
    `supabase/migrations/20261101130000_item_codes_and_sale_prices.sql`, then
-   `supabase/migrations/20261116120000_product_writes_through_functions_only.sql`. Each runs as one
+   `supabase/migrations/20261116120000_product_writes_through_functions_only.sql`, then the
+   five `supabase/migrations/20261117120*.sql` files as staged in stage D (the last one,
+   `…120400`, only after every copy of the site runs this version). Each runs as one
    transaction: if it fails, nothing changes.
 2. Run every `supabase/tests/*.sql` file. They roll back and leave nothing behind.
 3. Optional now, needed before taking orders: enable `pg_cron` (Dashboard →
@@ -1174,7 +1209,13 @@ name and light-up change, this version also reads the new product columns: **wit
 editor show errors.** Code from before that change keeps working with it applied (it
 doesn't read the new columns, and its saves keep their values). The same holds for
 `20261101130000_item_codes_and_sale_prices.sql`: this version reads `sale_price_paisa`, so
-apply it before running this code against dev.
+apply it before running this code against dev. **Since the 2026-11-17 hardening this
+version reads products in the admin through `admin_get_products`: without
+`20261117120200_internal_columns_admin_reads.sql` the product list and editor show
+"couldn't be loaded".** The previous version keeps working with every 2026-11-17
+migration except `20261117120400_restrict_internal_columns.sql`, after which its product
+list and editor stop loading; stage D applies that one last, once no copy of the
+previous version is left.
 
 #### B. Run this version locally against `kharchnsave-dev`
 
@@ -1209,7 +1250,8 @@ No deployment needed. `.env.local` already points the site at dev.
    registered by hash.
 4. **Turnstile:** a real widget for the site's hostname (never the testing keys, and never
    `CHECKOUT_TURNSTILE_TESTING_KEYS`). Optionally set `TURNSTILE_ALLOWED_HOSTNAMES`.
-5. **Client IP:** `CLIENT_IP_SOURCE` from the host's own documentation. Netlify's
+5. **Client IP:** `CLIENT_IP_SOURCE` from the host's own documentation, proven with the
+   three checks in stage E before checkout is switched on. Netlify's
    documentation (checked 2026-10-30) gives the IP only as `context.ip` /
    `getContext().ip` and documents no header, so it is undecided for Netlify. Hosts
    running several instances also need `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY`.
@@ -1217,6 +1259,131 @@ No deployment needed. `.env.local` already points the site at dev.
    dispatch, fail, retry, deliver, expire, cancel, return, and the `/order#k=…` page.
    Update `/delivery-returns`, the cart's demo note and the footer note.
 7. **Switch on:** `CHECKOUT_ENABLED=true`, then tick **Take orders**.
+
+#### D. Hosted follow-up for the 2026-11-17 hardening (owner)
+
+None of this has been done on a hosted project; everything below was tested on local,
+throwaway PostgreSQL only (`npm run test:db`, including `db-tests/hardening.test.ts`
+section 8, which runs stages 1 and 3 in order).
+
+**Rollout, in four stages.** Only one change is incompatible with the previous version
+of the site: `20261117120400_restrict_internal_columns.sql` stops its admin product list
+and editor from loading (they read the label name and held stock directly). Everything
+else works with both versions, so that one is applied last. Run each migration in the
+SQL Editor (it runs as `postgres`, the role that owns the schema), one query per file;
+each is one transaction, so a failed run changes nothing.
+
+| Stage | Do | Previous version of the site | This version |
+| --- | --- | --- | --- |
+| 0. Inventory | List every copy of the site that uses this database: hosted deployments (production, previews/branch deploys) and anyone's local `npm run dev`/`npm start`. Note which commit each runs. | | |
+| 1. Expand | Apply `20261117120000_function_default_privileges.sql`, `20261117120100_checkout_quota_quotes_and_phone_limit.sql`, `20261117120200_internal_columns_admin_reads.sql`, `20261117120300_idempotent_photo_registration.sql`, in that order. Run the check query below (expect `stage 1`). | Works (its checkout shows a refusal it doesn't know, "busy", as a general error; checkout is off) | Works |
+| 2. Switch the site | Short admin pause: ask admins to save their work and close admin tabs. Deploy this version to every copy found in stage 0 (restart local servers on this code); remove or redeploy any preview still on the previous version. Then admins reopen the admin. | Retired | Works |
+| 3. Contract | Only when stage 0's list contains this version alone: apply `20261117120400_restrict_internal_columns.sql`. Run the check query (expect `stage 3`) and the smoke test below. | Admin product list and editor fail (storefront, checkout, scan, labels still work) | Works |
+
+Notes on stage 2: admin sign-ins (Supabase sessions) stay valid across the deploy, so
+nobody has to sign in or redo two-step verification. A tab opened before the deploy runs
+the old page code; its next Save, photo upload or status change is answered with an
+error by the new server (Next.js only accepts actions from the build that served the
+page). The editor keeps the typed values on screen, but reload before carrying on,
+which is why admins save and close their tabs first.
+
+Supabase CLI users: `supabase db push` would apply all five at once. Apply stage 1 in the
+SQL Editor and record it with `supabase migration repair --status applied <version>`
+for each, then push (or run `…120400` by hand) at stage 3.
+
+**Check query** (read-only). After stage 1 `stage` is `stage 1`, after stage 3
+`stage 3`; the other columns must always be `false`, `false`, `true`, `true`:
+```sql
+select
+  case when has_column_privilege('authenticated', 'public.products', 'label_name', 'SELECT')
+         or has_column_privilege('authenticated', 'public.product_variants', 'reserved', 'SELECT')
+       then 'stage 1' else 'stage 3' end as stage,
+  has_function_privilege('anon', 'public.admin_get_products(uuid[])', 'EXECUTE') as anon_admin_read,
+  exists (select 1 from pg_default_acl d where d.defaclrole = 'postgres'::regrole and d.defaclnamespace = 0
+          and d.defaclobjtype = 'f' and array_to_string(d.defaclacl, ',') like '%=X/%') as public_default_execute,
+  has_function_privilege('authenticated', 'public.admin_get_products(uuid[])', 'EXECUTE') as admins_can_read,
+  has_function_privilege('anon', 'public.place_cod_order(text, text, jsonb)', 'EXECUTE') as checkout_works;
+```
+Then run every `supabase/tests/*.sql` file (they roll back) and `npm run db:verify`.
+**Smoke test** (after stages 2 and 3, as a verified admin): open the product list and a
+product (label name and held stock show), print a label, scan a barcode, upload a photo,
+save and publish.
+
+**Recovery.** Every recovery keeps the access restrictions; none re-grants columns.
+- A stage 1 migration fails: nothing from that file was applied. Fix the cause and run
+  it again; later files wait.
+- This version misbehaves after stage 2, before stage 3: roll the site back to the
+  previous version; stage 1 works with it. Fix forward, then repeat stage 2.
+- After stage 3, a copy of the previous version turns up, or the site has to be rolled
+  back past this version: its admin product list and editor stay unavailable (shop,
+  checkout, scan and labels keep working) until this version is deployed there again.
+  Treat that as an admin maintenance window. **Don't undo `…120400` by granting the
+  columns back:** a column grant can't be limited to admins, so it would show label
+  names and held stock to every signed-in account again. Urgent product changes in the
+  meantime go through the owner in the SQL Editor.
+- Undoing stages 1–3 isn't scripted; prefer fixing forward. If `…120300` ever has to be
+  replaced, keep `private.photo_registrations`: it is what makes upload retries safe.
+
+**After the rollout:**
+
+1. **From now on, grant new functions explicitly.** A function created by hand in the
+   SQL Editor is callable by nobody but its owner until you
+   `grant execute on function … to authenticated;` (or `anon`), as every migration does.
+2. **Disable public sign-up** (Dashboard → Authentication → Sign In / Providers →
+   **Allow new users to sign up**: off, then Save). Admin accounts are made by the owner,
+   not by sign-up: Authentication → Users → **Add user** (or **Invite**) still works, then
+   add the membership as in [Making yourself an admin](#making-yourself-an-admin-one-time-owner-setup).
+   Existing admins and their two-step verification are unaffected. Check:
+   `curl -s "$NEXT_PUBLIC_SUPABASE_URL/auth/v1/settings" -H "apikey: $NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"`
+   shows `"disable_signup":true`. (On 2026-11-16 it was `false`.)
+3. **Client IP (`CLIENT_IP_SOURCE`)**: see the next section. Checkout must stay off on
+   the host until its three checks pass.
+
+#### E. Client IP header: choosing it and proving it (PENDING: no host selected yet)
+
+**Choosing.** Use only a header the chosen host documents as **set by its own edge,
+replacing anything the visitor sent**, and holding exactly one address (for example
+Cloudflare's `CF-Connecting-IP` or Vercel's `x-real-ip`; read the chosen host's current
+documentation: Netlify's documented none on 2026-10-30). Never `X-Forwarded-For` (the
+site refuses it). Set `CLIENT_IP_SOURCE=header:<name>`.
+
+**What the site does** (unit-tested: `lib/checkout/server-config.test.ts`):
+
+| `CLIENT_IP_SOURCE` | On a request | Result |
+| --- | --- | --- |
+| unset, empty or invalid (e.g. `header:x-forwarded-for`) | | Checkout is off: `/checkout` shows "Checkout isn't connected yet", `/api/checkout/quote` answers `503 {"error":"disabled"}`, the admin pages list `CLIENT_IP_SOURCE` as not set |
+| `none` | | Every request counts in one bucket shared by everyone (`ip:unknown`) |
+| `header:<name>` | the header holds one valid address | That address's own bucket (stored only as an HMAC) |
+| `header:<name>` | the header is missing, empty, a list or not an address | The shared bucket, as with `none` (strict, never a bypass) |
+
+**Proving it on the deployment.** Three checks, all **pending** until a host is
+selected. Prepare: checkout configured on that deployment (taking orders can stay off;
+quotes still work), and in Settings a temporary **price checks per connection, 10 min**
+of `5`. Use two devices on **different networks** (a laptop on Wi-Fi, a phone on mobile
+data with Wi-Fi off) and confirm their public addresses differ. Rate-limit windows last
+10 minutes: start each check in a fresh window (wait 10 minutes between checks).
+
+```bash
+# One quote request; prints the HTTP status (200, 429 or 503). Extra arguments are headers.
+quote() { curl -s -o /dev/null -w "%{http_code}\n" -X POST "https://<site>/api/checkout/quote" \
+  -H "content-type: application/json" "$@" -d '{"lines":[{"sku":"X","quantity":1,"unit_price_paisa":100}],"city":""}'; }
+```
+
+| # | Check | Steps | Pass |
+| --- | --- | --- | --- |
+| 1 | Two real addresses get separate buckets | Device A: `quote` 6 times. Then device B: `quote` once. | A's 6th is `429`; B's is `200` |
+| 2 | Forged headers can't change who you are | Device A, while still limited from check 1 (same window): `quote -H "<header-name>: 198.51.100.1"`, then the same with `-H "X-Forwarded-For: 198.51.100.2"`, `-H "X-Real-IP: 198.51.100.3"`, `-H "CF-Connecting-IP: 198.51.100.4"`, `-H "True-Client-IP: 198.51.100.5"`, `-H "Forwarded: for=198.51.100.6"`. Also, in a fresh window, 7 requests from A each forging a different `<header-name>` value. | Every forged request from A is `429`; of the 7, the 6th and 7th are `429`. Any `200` means a visitor-supplied value was trusted: don't use that header |
+| 3 | Missing or invalid header behaves as documented | (a) Set `CLIENT_IP_SOURCE=header:x-kns-not-set` (a header the host never sends) and redeploy. Fresh window: device A `quote` 5 times, then device B `quote` once. (b) Set `CLIENT_IP_SOURCE=header:x-forwarded-for` and redeploy: `quote` from either device; open `/checkout` and the admin Orders page. | (a) B's request is `429` (both share the one bucket). (b) `503`, the "isn't connected yet" page, and the admin warning naming `CLIENT_IP_SOURCE` |
+
+Afterwards restore the real `CLIENT_IP_SOURCE`, redeploy, and set the quote limit back.
+Record the date, host and header name here when all three pass.
+
+| Check | Status |
+| --- | --- |
+| 1. Separate buckets for two real addresses | Pending (no host selected) |
+| 2. Forged headers ignored | Pending (no host selected) |
+| 3. Missing/invalid header behaviour on the host | Pending (no host selected); the site's side is unit-tested |
+
 
 **To stop taking orders at once:** untick **Take orders** (the database refuses new
 orders immediately), or unset `CHECKOUT_ENABLED`. Undoing the migrations isn't scripted.

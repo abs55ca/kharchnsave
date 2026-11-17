@@ -49,6 +49,42 @@ describe("client IP", () => {
     expect(clientIp(new Headers({ "x-test-client-ip": "1.2.3.4, 5.6.7.8" }), { kind: "header", header: "x-test-client-ip" })).toBeNull();
   });
 
+  it("unset or invalid: checkout stays off; \"none\", or a configured header missing or invalid on a request: one shared bucket", () => {
+    const base = { CHECKOUT_ENABLED: "true", CHECKOUT_GATEWAY_SECRET: SECRET, TURNSTILE_SITE_KEY: "site", TURNSTILE_SECRET_KEY: "secret" };
+    for (const value of [undefined, "", "header:x-forwarded-for", "header:", "x-real-ip"]) {
+      const config = getCheckoutConfig({ ...base, CLIENT_IP_SOURCE: value });
+      expect(config.enabled, String(value)).toBe(false);
+      expect(config.problems).toEqual(["CLIENT_IP_SOURCE"]);
+    }
+    const none = getCheckoutConfig({ ...base, CLIENT_IP_SOURCE: "none" });
+    expect(none.enabled).toBe(true);
+    expect(clientBucket(clientIp(new Headers({ "x-real-ip": "203.0.113.5" }), none.clientIp), SECRET)).toBeNull();
+    const header = getCheckoutConfig({ ...base, CLIENT_IP_SOURCE: "header:x-test-client-ip" }).clientIp;
+    for (const headers of [new Headers(), new Headers({ "x-test-client-ip": "not-an-ip" }), new Headers({ "x-test-client-ip": "" })]) {
+      // null: the database counts it in the shared bucket "ip:unknown".
+      expect(clientBucket(clientIp(headers, header), SECRET)).toBeNull();
+    }
+  });
+
+  it("two real addresses get separate buckets; forged copies of other headers change nothing", () => {
+    const source = { kind: "header" as const, header: "x-test-client-ip" };
+    const bucketFor = (headers: Record<string, string>) => clientBucket(clientIp(new Headers(headers), source), SECRET);
+    const a = bucketFor({ "x-test-client-ip": "203.0.113.5" });
+    const b = bucketFor({ "x-test-client-ip": "198.51.100.7" });
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(a).not.toBe(b);
+    const forged = bucketFor({
+      "x-test-client-ip": "203.0.113.5",
+      "x-forwarded-for": "198.51.100.2",
+      "x-real-ip": "198.51.100.3",
+      "cf-connecting-ip": "198.51.100.4",
+      "true-client-ip": "198.51.100.5",
+      forwarded: "for=198.51.100.6",
+    });
+    expect(forged).toBe(a);
+  });
+
   it("is hashed with a secret before it reaches the database", () => {
     const bucket = clientBucket("203.0.113.5", SECRET)!;
     expect(bucket).toMatch(/^ip:[0-9a-f]{64}$/);

@@ -4,12 +4,14 @@ import { UUID_PATTERN } from "@/lib/catalog/photos";
 import type { LightUpCondition } from "@/lib/catalog/light-up";
 import type { Condition, Department, ItemStatus, Style } from "@/lib/catalog/types";
 import { labelNameFor } from "@/lib/labels/name-fit";
+import { readTimeout } from "@/lib/supabase/config";
 import { paisaToRupeesText, type FieldErrors, type ProductFormValues } from "./product-input";
 
 /*
  * Admin reads of the catalogue, always through the verified admin's own
  * session client (never cached, never a service key): the database's RLS
- * lets only verified admins (member + aal2) see drafts and archived products.
+ * lets only verified admins (member + aal2) see drafts and archived products,
+ * and the internal columns come only through admin_get_products.
  */
 
 export type PublicationStatus = "draft" | "published" | "archived";
@@ -36,8 +38,18 @@ export type EditableProduct = {
   photos: AdminPhoto[];
 };
 
-export function adminPhotoSrc(productId: string, imageId: string) {
-  return `/admin/products/${productId}/photos/${imageId}`;
+/**
+ * Longest side (pixels) of the admin previews, made on request from the
+ * stored photo (app/admin/products/[id]/photos/[imageId]/route.ts): "thumb"
+ * for the product list and the scan page (shown at 56–96 px), "preview" for
+ * the editor (about 350 px). Both cover a 2x screen. "full" is the stored photo.
+ */
+export const ADMIN_PREVIEW_SIZES = { thumb: 256, preview: 720 } as const;
+export type AdminPhotoSize = keyof typeof ADMIN_PREVIEW_SIZES | "full";
+
+export function adminPhotoSrc(productId: string, imageId: string, size: AdminPhotoSize = "preview") {
+  const path = `/admin/products/${productId}/photos/${imageId}`;
+  return size === "full" ? path : `${path}?size=${size}`;
 }
 
 type ProductRow = {
@@ -85,13 +97,20 @@ type ProductRow = {
   }[];
 };
 
-const EDIT_COLUMNS = `
-  id, version, item_code, slug, name, brand, department, styles, item_status, condition,
-  condition_notes, colour, description, price_paisa, sale_price_paisa, publication_status, listed_at, updated_at,
-  label_name, light_up, light_up_condition, light_up_activation,
-  product_variants (sku, size_eu, stock, reserved, inventory_version, variant_barcodes (barcode)),
-  product_images (id, src, storage_path, alt, width, height, sort_order, shows_defect)
-`;
+/**
+ * The editor's copy of products, internal columns included (label_name,
+ * reserved, inventory_version), from admin_get_products: signed-in sessions
+ * can't read those columns directly, and the function refuses anyone but a
+ * verified admin (supabase/migrations/20261117120200_internal_columns_admin_reads.sql;
+ * the direct column access is removed by 20261117120400_restrict_internal_columns.sql).
+ * One call is one snapshot, so stock and inventory versions always match.
+ */
+async function getProductRows(supabase: AdminSessionClient, ids: string[]): Promise<ProductRow[]> {
+  if (ids.length === 0) return [];
+  const { data, error } = await supabase.rpc("admin_get_products", { p_product_ids: ids }).abortSignal(readTimeout());
+  if (error) throw new AdminDataError(`Couldn't load the product (${error.code || "no code"}).`, { cause: error });
+  return (data ?? []) as ProductRow[];
+}
 
 function barcodeOf(embedded: ProductRow["product_variants"][number]["variant_barcodes"]) {
   const row = Array.isArray(embedded) ? embedded[0] : embedded;
@@ -159,9 +178,8 @@ function toEditable(row: ProductRow): EditableProduct {
 /** One product for the edit screen, or null if it doesn't exist (or isn't visible). */
 export async function getEditableProduct(supabase: AdminSessionClient, id: string) {
   if (!UUID_PATTERN.test(id)) return null;
-  const { data, error } = await supabase.from("products").select(EDIT_COLUMNS).eq("id", id).maybeSingle();
-  if (error) throw new AdminDataError(`Couldn't load the product (${error.code || "no code"}).`, { cause: error });
-  return data ? toEditable(data as ProductRow) : null;
+  const [row] = await getProductRows(supabase, [id]);
+  return row ? toEditable(row) : null;
 }
 
 export type ProductListItem = {
@@ -199,7 +217,7 @@ export async function listProducts(
   let query = supabase
     .from("products")
     .select(
-      `id, item_code, name, label_name, brand, publication_status, item_status, price_paisa, sale_price_paisa, updated_at,
+      `id, item_code, name, brand, publication_status, item_status, price_paisa, sale_price_paisa, updated_at,
        product_variants (stock), product_images (id, src, storage_path, sort_order)`,
       { count: "exact" },
     )
@@ -219,7 +237,6 @@ export async function listProducts(
     id: string;
     item_code: string;
     name: string;
-    label_name: string | null;
     brand: string;
     publication_status: PublicationStatus;
     item_status: ItemStatus;
@@ -229,7 +246,10 @@ export async function listProducts(
     product_variants: { stock: number }[];
     product_images: { id: string; src: string | null; storage_path: string | null; sort_order: number }[];
   };
-  const items: ProductListItem[] = (data as Row[]).map((row) => {
+  // Label names are internal: read through the admin function, for this page only.
+  const rows = data as Row[];
+  const labelNames = new Map((await getProductRows(supabase, rows.map((r) => r.id))).map((r) => [r.id, r.label_name]));
+  const items: ProductListItem[] = rows.map((row) => {
     const first = [...row.product_images].sort((a, b) => a.sort_order - b.sort_order)[0];
     return {
       id: row.id,
@@ -243,9 +263,9 @@ export async function listProducts(
       totalStock: row.product_variants.reduce((sum, v) => sum + v.stock, 0),
       sizeCount: row.product_variants.length,
       photoCount: row.product_images.length,
-      thumbnailSrc: first ? (first.storage_path ? adminPhotoSrc(row.id, first.id) : first.src) : null,
+      thumbnailSrc: first ? (first.storage_path ? adminPhotoSrc(row.id, first.id, "thumb") : first.src) : null,
       updatedAt: row.updated_at,
-      labelProblem: labelNameFor({ labelName: row.label_name, name: row.name }).problem,
+      labelProblem: labelNameFor({ labelName: labelNames.get(row.id) ?? null, name: row.name }).problem,
     };
   });
   return { items, total: count ?? 0 };
