@@ -193,6 +193,7 @@ Notes:
 | `supabase/migrations/20261031140000_settings_where_clauses.sql` | Adds WHERE clauses to the settings and delivery-city functions; Supabase's API refuses UPDATE or DELETE without one (pg-safeupdate) |
 | `supabase/migrations/20261101120000_label_names_and_light_up.sql` | Optional label name (admin-only; the publishable key reads products column by column without it) and light-up soles (not recorded / no / yes with a condition); the admin product functions save them without touching stock |
 | `supabase/migrations/20261101130000_item_codes_and_sale_prices.sql` | Automatic item codes (`ITEM-000001`, from their own sequence) and optional sale prices; checkout, in-store sales and order snapshots charge the sale price |
+| `supabase/migrations/20261116120000_product_writes_through_functions_only.sql` | Products and photos change only through the admin functions: removes verified admins' direct insert/update/delete grants on `products` and `product_images` (which skipped the version check), and makes `admin_add_product_image` and `admin_set_publication_status` SECURITY DEFINER like the other admin product functions |
 | `supabase/tests/item_codes_sale_prices_test.sql` | Tests for code assignment and collisions, existing codes, the sale price rules, quotes, free delivery, orders and in-store sales at sale prices, and historical orders. Rolls back and puts its counters back |
 | `supabase/tests/label_names_light_up_test.sql` | Tests for the label name and light-up rules, who can read the label name, and that saving them leaves stock, held pairs, inventory versions and the ledger alone. Rolls back |
 | `supabase/tests/orders_test.sql` | Tests for order permissions, the gateway secret, checkout, retries, hold expiry, admin actions, delivery and payment, returns, in-store sales, stale stock edits and ledger reconciliation. Rolls back |
@@ -1148,7 +1149,8 @@ In the dev project's SQL Editor:
    `supabase/migrations/20261031130000_guest_orders.sql`, then
    `supabase/migrations/20261031140000_settings_where_clauses.sql`, then
    `supabase/migrations/20261101120000_label_names_and_light_up.sql`, then
-   `supabase/migrations/20261101130000_item_codes_and_sale_prices.sql`. Each runs as one
+   `supabase/migrations/20261101130000_item_codes_and_sale_prices.sql`, then
+   `supabase/migrations/20261116120000_product_writes_through_functions_only.sql`. Each runs as one
    transaction: if it fails, nothing changes.
 2. Run every `supabase/tests/*.sql` file. They roll back and leave nothing behind.
 3. Optional now, needed before taking orders: enable `pg_cron` (Dashboard →

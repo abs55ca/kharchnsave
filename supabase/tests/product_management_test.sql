@@ -170,6 +170,12 @@ select pm_tests.returns('nobody but the owner can delete products, change IDs or
         (has_column_privilege('authenticated', 'public.product_variants', 'product_id', 'UPDATE'), 'update product_variants.product_id')
       ) t(granted, x) where granted $q$, '');
 
+-- 20261116120000_product_writes_through_functions_only.sql
+select pm_tests.returns('nobody writes products or photos directly: only through the admin functions',
+  $q$ select string_agg(r || ' ' || p || ' ' || t, ', ') from unnest(array['anon', 'authenticated']) r,
+        unnest(array['public.products', 'public.product_images']) t, unnest(array['INSERT', 'UPDATE', 'DELETE']) p
+      where case when p = 'DELETE' then has_table_privilege(r, t, p) else has_any_column_privilege(r, t, p) end $q$, '');
+
 select pm_tests.returns('admin memberships are still owner-only',
   $q$ select string_agg(r || ' ' || p, ', ') from unnest(array['anon', 'authenticated']) r,
         unnest(array['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) p
