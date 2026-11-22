@@ -1,10 +1,15 @@
 # Pricing rollout review — 2026-11-22
 
-The compatible database expansion is installed on **kharchnsave-dev**
-(`tjfaouvgrmeeambvekfz`). Hosting is Netlify at https://kharchnsave.netlify.app/.
-The review commit has a successful Netlify preview at
-https://deploy-preview-1--kharchnsave.netlify.app/.
-GitHub write access through the repository owner is verified.
+The reviewed code is merged through [PR #1](https://github.com/abs55ca/kharchnsave/pull/1)
+and published on https://kharchnsave.netlify.app/ at commit `d0317794ef5bdff09de928f15a9969201c5cc630`.
+[Netlify production deploy](https://app.netlify.com/projects/kharchnsave/deploys/6b02fdd792d58db9dfae0c99)
+completed successfully. The earlier production attempt failed because pricing
+columns were not installed yet; the new production build generated 50 pages.
+
+The database expansion, corrections, final column restrictions and scheduler are
+installed on **kharchnsave-dev** (`tjfaouvgrmeeambvekfz`). Historical migration
+tracking has been reconciled with all 22 repository migrations. This is a
+technical rollout record; the customer-launch checks below remain outstanding.
 
 ## Corrections
 
@@ -27,23 +32,23 @@ Both regression tests failed before the correction and pass after it.
 | Check | Result |
 | --- | --- |
 | Unit tests | 288 passed |
-| Full database suite | 153 passed |
-| Additional staged-rollout regression | 1 passed separately (154 database tests total) |
+| Full database suite | 154 passed in GitHub Actions |
 | ESLint / TypeScript | Passed; run `npx next typegen` before typecheck on a fresh checkout |
 | Production build using the local API stand-in | Passed; 47 pages generated |
-| Browser tests | User-supplied run on the review branch: all 16 passed in 1.2 minutes; production build generated all 47 pages |
+| Browser tests | All 16 passed in GitHub Actions (55.7 seconds) and in the user's Windows run |
 | Live `npm run db:verify` against dev | All 42 checks passed |
 | Live PostgREST pricing columns | HTTP 200 |
 | Anonymous pricing-admin RPC, agent table, giveaway flag | Rejected with SQLSTATE 42501 |
 | Actual pg_cron sale scheduler | Automatic run succeeded; heartbeat reported zero failures |
 
+[GitHub CI](https://github.com/abs55ca/kharchnsave/actions/runs/45033113607) passed lint, typecheck, unit, database, production build and browser checks.
 No Docker was used. Chromium could not launch in the review workspace; the
 user ran the exact test command on their Windows checkout and supplied the
 complete successful output. The refresh-token errors in the final test are
 expected: it intentionally expires a session and verifies safe recovery.
 The sale start/end appeared after two page loads in that run.
 
-The Netlify preview serves the tested review commit. A hosted browser check
+Netlify production serves the merged review commit. A hosted browser check
 confirmed product display without unsupported discount badges, add-to-cart and
 checkout rendering. Production home/shop/checkout return HTTP 200, and protected
 admin pricing redirects to sign-in. Hosted authenticated admin operations and
@@ -90,23 +95,42 @@ roles. Product/photo writes now require the guarded admin functions.
 succeeded. There are no campaigns to activate. The existing order-hold expiry
 job remains active.
 
-## Remaining rollout
+## Final hardening and migration history
 
-1. Merge this correction and verify Netlify production deploys the merged commit.
-   Deploy/restart them on the corrected code. Do not activate sales yet.
-2. Once every app uses `admin_get_products`, apply
-   `supabase/setup/complete_pricing_hardening.sql`. This is the deferred
-   Nov 17 column-access contract, preserving the newer public pricing columns.
-   Until then, signed-in users retain the previous access to label names and
-   held-stock fields. Create no agent accounts before completing this step.
-3. Verify Auth signup/redirect settings and server-only agent/checkout settings
-   described in README. Do not put secret keys in `NEXT_PUBLIC_*` variables.
-4. Browser tests passed on the user's computer. Exercise preview/apply, one test
-   sale and its end, referral checkout, and scheduled cache refresh on the
-   deployed app before activating real campaigns.
-5. Reconcile historical migration tracking before using `supabase db push`.
-   The hosted combined migration is not a repository filename. Do not replay
-   old CREATE migrations or mark the deferred contract applied prematurely.
+After confirming the reviewed production deploy, applied
+`supabase/setup/complete_pricing_hardening.sql` as hosted migration
+`20261122143848_complete_pricing_hardening`. Direct authenticated reads of
+`label_name`, `reserved` and `inventory_version` are now denied; public pricing
+columns remain readable. The staged-rollout regression also exercises the
+intermediate explicit-column grant used on this project.
+
+Compared 965 schema signatures from a fresh database built using every repository
+migration against the hosted database: functions and API grants, columns and
+column grants, constraints, triggers, RLS table flags, policies and indexes.
+No missing or extra objects; the only differing signature is Supabase's platform
+`rls_auto_enable()` implementation, replaced by a stub in local tests. Product
+fingerprint `ccb00fcccc6da2fd69dd18870cc91538` and inventory fingerprint
+`b2553ac131fffcf1ef942d06dad18e42` are unchanged; orders remain two.
+
+Migration bookkeeping was repaired in a guarded transaction after this comparison.
+The three rollout entries were replaced with the 22 canonical repository versions,
+without running migration SQL again or changing application data. These entries
+record reconciliation of the present schema, not historical execution timestamps.
+The original version/name/statements are preserved in
+[the rollout history archive](rollout/20261122-applied-migrations.json), with the
+bookkeeping transaction in [the audit SQL](rollout/20261122-history-repair.sql).
+**These are audit records, not scripts to replay.** Do not reset the hosted database.
+For future updates, pull main and review `supabase db push --dry-run` first.
+
+## Remaining customer-launch checks
+
+1. Verify Auth signup/redirect settings and server-only agent settings described
+   in README. Do not put secret keys in `NEXT_PUBLIC_*` variables.
+2. Exercise authenticated preview/apply, one controlled test sale and its end,
+   referral checkout, and scheduled cache refresh on the deployed app before
+   activating real campaigns. Local/CI browser tests do not verify hosted CDN behavior.
+3. Review published demo/test listings and demo wording before accepting customers.
+   No product prices, stock, campaigns, agents or real orders were changed for smoke tests.
 
 Security advisors were reviewed. New agent tables have RLS and no direct API
 grants; their no-policy notices reflect RPC-only access. Admin functions require

@@ -14,6 +14,10 @@ it("supports the staged dev rollout and retains public pricing columns when inte
     const { rows } = await db.query("select has_any_column_privilege('authenticated','public.products','UPDATE') as direct_write, has_column_privilege('authenticated','public.products','label_name','SELECT') as legacy_read, has_column_privilege('anon','public.products','reference_price_paisa','SELECT') as reference_read");
     expect(rows[0]).toEqual({ direct_write: false, legacy_read: true, reference_read: true });
 
+    // The live compatibility step replaced table SELECT with column grants.
+    // Verify the later table-level REVOKE removes this explicit internal grant too.
+    await db.exec("revoke select on public.products from authenticated; grant select (id, label_name, reference_price_paisa, referral_excluded) on public.products to authenticated;");
+
     await db.exec(read("supabase/setup/complete_pricing_hardening.sql"));
     const result = await db.query("select has_column_privilege('authenticated','public.products','label_name','SELECT') as legacy_read, has_column_privilege('authenticated','public.products','reference_price_paisa','SELECT') as reference_read, has_column_privilege('authenticated','public.products','zero_price_approved','SELECT') as giveaway_read, has_column_privilege('authenticated','public.product_variants','reserved','SELECT') as held_stock_read");
     expect(result.rows[0]).toEqual({ legacy_read: false, reference_read: true, giveaway_read: false, held_stock_read: false });

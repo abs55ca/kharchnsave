@@ -1,8 +1,8 @@
 # Kharch n Save storefront
 
 > **2026-11-22 rollout update:** the compatible pricing/sales database expansion and
-> scheduler are installed on `kharchnsave-dev`. The app rollout and final column-access
-> restriction are pending. See [current review and rollout status](docs/pricing-rollout-review.md);
+> scheduler are installed on `kharchnsave-dev`. The reviewed app is published on Netlify,
+> final column restrictions are applied, and migration tracking is reconciled. See [current review and rollout status](docs/pricing-rollout-review.md);
 > older "not applied" notes below describe the original implementation state.
 
 Online store for **Kharch n Save** (*Style Zyada. Kharch Kam.*), a Pakistani shop selling
@@ -2050,5 +2050,6 @@ Customer accounts, order emails and SMS aren't built either.
 - [ ] Any new admin write policies require `public.is_catalogue_admin()` (membership
       and `aal2`; see [Admin area](#admin-area))
 # store
-#   k h a r c h n s a v e  
+#   k h a r c h n s a v e 
+ 
  
