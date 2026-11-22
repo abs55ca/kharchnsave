@@ -2050,6 +2050,5 @@ Customer accounts, order emails and SMS aren't built either.
 - [ ] Any new admin write policies require `public.is_catalogue_admin()` (membership
       and `aal2`; see [Admin area](#admin-area))
 # store
-#   k h a r c h n s a v e 
- 
+#   k h a r c h n s a v e  
  
