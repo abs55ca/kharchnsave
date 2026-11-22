@@ -85,7 +85,7 @@ const password = randomBytes(18).toString("base64url");
 const database = new EmbeddedPostgres({
   databaseDir: dir, port: dbPort, user: "postgres", password, persistent: false,
   initdbFlags: ["--encoding=UTF8", "--locale=C"],
-  postgresFlags: ["-c", "listen_addresses=127.0.0.1", "-c", "max_connections=200"],
+  postgresFlags: ["-c", "listen_addresses=127.0.0.1", "-c", "unix_socket_directories=", "-c", "max_connections=200"],
   onLog: () => {}, onError: () => {},
 });
 const children = [];

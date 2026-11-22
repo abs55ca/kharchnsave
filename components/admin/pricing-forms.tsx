@@ -123,10 +123,10 @@ function Margin({ e }: { e: Economics | null | undefined }) {
   return (
     <div className="text-xs">
       <p>
-        Worst case ({scenario}): customer pays {rupees(w.paid_paisa)}, commission {rupees(w.commission_paisa)},{" "}
+        Lowest amount kept ({scenario}): customer pays {rupees(w.paid_paisa)}, commission {rupees(w.commission_paisa)},{" "}
         {w.retained_paisa === null ? <span className="font-semibold text-danger">kept: unknown (no cost recorded)</span> : <span>kept after cost: <strong>{rupees(w.retained_paisa)}</strong></span>}
       </p>
-      {e.margin === "violation" ? <p className="font-semibold text-danger">Below your minimum profit/margin.</p> : null}
+      {e.margin === "violation" ? <p className="font-semibold text-danger">At least one scenario is below your minimum profit or margin.</p> : null}
       {e.margin === "cost_unknown" ? <p className="font-semibold text-danger">Cost unknown: the minimum can’t be checked.</p> : null}
       {e.agents_excluded > 0 ? (
         <p className="text-muted">{e.agents_excluded} of {e.agents_enabled} enabled agent code(s) don’t apply here {e.referral_allowed ? "(their terms exclude sale items)" : "(no referral discounts on this sale)"}.</p>

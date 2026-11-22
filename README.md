@@ -1,5 +1,10 @@
 # Kharch n Save storefront
 
+> **2026-11-22 rollout update:** the compatible pricing/sales database expansion and
+> scheduler are installed on `kharchnsave-dev`. The app rollout and final column-access
+> restriction are pending. See [current review and rollout status](docs/pricing-rollout-review.md);
+> older "not applied" notes below describe the original implementation state.
+
 Online store for **Kharch n Save** (*Style Zyada. Kharch Kam.*), a Pakistani shop selling
 pre-loved men's and women's shoes and brand-new kids' shoes. China-branded shoes and
 clothing are shown as "coming soon" and can't be bought.
@@ -1949,6 +1954,8 @@ Nothing here is applied to a hosted project yet.
    ```
    All four must be `true`.
 2. **Apply** `20261121120000_score_pricing_and_sales.sql` in the SQL Editor (one transaction).
+   Then apply `20261122134446_pricing_review_guards.sql` before using pricing or sales.
+   On `kharchnsave-dev` both are already installed; see the review linked above.
 3. **Deploy this version** of the site to every copy that uses the database, **before activating
    any sale or setting any sale price**. See the compatibility limits below.
 4. **Optional:** enable pg_cron and run `supabase/setup/schedule_sale_campaigns.sql`.
