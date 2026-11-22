@@ -506,6 +506,21 @@ describe("5. honest reference prices", () => {
 });
 
 describe("6. campaigns", () => {
+  it("does not mark a campaign line applied when its reviewed regular price no longer matches", async () => {
+    await endAllActive();
+    const p = await product({ price: rs(3000) });
+    const c = await createCampaign({ name: "Changed price guard", discount_bp: 1000 });
+    await select(c.id, [{ product_id: p.id, state: "included" }]);
+    const { rows } = await db.query(
+      "select private.campaign_apply_line(c, $2, $3, $4, null) as applied from private.sale_campaigns c where c.id = $1",
+      [c.id, p.id, rs(4000), rs(2695)],
+    );
+    expect(rows[0].applied).toBe(false);
+    expect((await row(p.id)).sale_price_paisa).toBeNull();
+    expect((await db.query("select applied_at from private.sale_campaign_products where campaign_id = $1 and product_id = $2", [c.id, p.id])).rows[0].applied_at).toBeNull();
+    await endCampaign(c.id, "cancel");
+  });
+
   it("draft → active → ended: the reviewed sale prices, then the regular prices again", async () => {
     await endAllActive();
     const n1 = await product({ price: rs(4995) });
@@ -671,6 +686,32 @@ describe("6. campaigns", () => {
 });
 
 describe("7. margins and agents", () => {
+  it("checks the margin of every agent even when a different agent has the lowest profit", async () => {
+    await endAllActive();
+    await disableAgents();
+    await settings({ min_profit_paisa: null, min_margin_bp: 9000 });
+    try {
+      await agent({ discount_bp: 2000, commission_bp: 0, applies_to_sale_items: true });
+      await agent({ discount_bp: 0, commission_bp: 1500, applies_to_sale_items: true });
+      // First agent: Rs. 80 retained / Rs. 80 paid = 100% margin.
+      // Second: Rs. 85 retained / Rs. 100 paid = 85%: below the 90% minimum.
+      const { rows } = await db.query("select private.unit_economics(10000, 0, true, true) as r");
+      expect(rows[0].r.worst).toMatchObject({ paid_paisa: 8000, retained_paisa: 8000 });
+      expect(rows[0].r.margin).toBe("violation");
+      await settings({ min_margin_bp: null });
+      const p = await product({ price: rs(1000) });
+      await setPricing([{ product_id: p.id, mode: "manual", cost_paisa: 0 }]);
+      await settings({ min_margin_bp: 9000 });
+      const c = await createCampaign({ name: "Margin ratios", discount_bp: 1000 });
+      await select(c.id, [{ product_id: p.id, state: "included" }]);
+      expect((await campaign(c.id)).lines[0]).toMatchObject({ action: "skip", reason: "margin_violation" });
+      await endCampaign(c.id, "cancel");
+    } finally {
+      await settings({ min_profit_paisa: null, min_margin_bp: null });
+      await disableAgents();
+    }
+  });
+
   it("unknown costs stay unknown; margins use the worst current agent terms; overrides are explicit and audited", async () => {
     await endAllActive();
     await disableAgents();

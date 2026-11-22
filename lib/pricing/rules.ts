@@ -122,12 +122,15 @@ export function referralScenario(pricePaisa: number, discountBp: number, commiss
 export type MarginRule = { minProfitPaisa: number | null; minMarginBp: number | null };
 export type MarginStatus = "not_configured" | "cost_unknown" | "ok" | "violation";
 
-/** Whether the worst scenario keeps the configured minimum profit and margin (margin = retained ÷ what the customer pays). */
-export function marginStatus(worst: Pick<Scenario, "paidPaisa" | "retainedPaisa">, rule: MarginRule): MarginStatus {
+/**
+ * Checks one scenario (margin = retained ÷ what the customer pays).
+ * Check every eligible scenario: the lowest cash amount need not have the lowest margin.
+ */
+export function marginStatus(scenario: Pick<Scenario, "paidPaisa" | "retainedPaisa">, rule: MarginRule): MarginStatus {
   if (rule.minProfitPaisa === null && rule.minMarginBp === null) return "not_configured";
-  if (worst.retainedPaisa === null) return "cost_unknown";
-  if (rule.minProfitPaisa !== null && worst.retainedPaisa < rule.minProfitPaisa) return "violation";
-  if (rule.minMarginBp !== null && worst.retainedPaisa * 10000 < rule.minMarginBp * worst.paidPaisa) return "violation";
+  if (scenario.retainedPaisa === null) return "cost_unknown";
+  if (rule.minProfitPaisa !== null && scenario.retainedPaisa < rule.minProfitPaisa) return "violation";
+  if (rule.minMarginBp !== null && scenario.retainedPaisa * 10000 < rule.minMarginBp * scenario.paidPaisa) return "violation";
   return "ok";
 }
 
