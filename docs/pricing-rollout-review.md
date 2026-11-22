@@ -1,9 +1,10 @@
 # Pricing rollout review — 2026-11-22
 
 The compatible database expansion is installed on **kharchnsave-dev**
-(`tjfaouvgrmeeambvekfz`). The app rollout is incomplete: no deployment URL was
-identified, and browser tests could not launch Chromium in the review workspace.
-GitHub write access through the repository owner is now verified.
+(`tjfaouvgrmeeambvekfz`). Hosting is Netlify at https://kharchnsave.netlify.app/.
+The review commit has a successful Netlify preview at
+https://deploy-preview-1--kharchnsave.netlify.app/.
+GitHub write access through the repository owner is verified.
 
 ## Corrections
 
@@ -30,15 +31,29 @@ Both regression tests failed before the correction and pass after it.
 | Additional staged-rollout regression | 1 passed separately (154 database tests total) |
 | ESLint / TypeScript | Passed; run `npx next typegen` before typecheck on a fresh checkout |
 | Production build using the local API stand-in | Passed; 47 pages generated |
-| Browser tests | Blocked at browser launch: Chromium's socket call was denied by the workspace |
+| Browser tests | User-supplied run on the review branch: all 16 passed in 1.2 minutes; production build generated all 47 pages |
 | Live `npm run db:verify` against dev | All 42 checks passed |
 | Live PostgREST pricing columns | HTTP 200 |
 | Anonymous pricing-admin RPC, agent table, giveaway flag | Rejected with SQLSTATE 42501 |
 | Actual pg_cron sale scheduler | Automatic run succeeded; heartbeat reported zero failures |
 
-No Docker was used. The browser results from the earlier implementation report
-were not independently reproduced. Hosted admin interaction, referral checkout
-and cache/CDN behavior still require an actual app deployment.
+No Docker was used. Chromium could not launch in the review workspace; the
+user ran the exact test command on their Windows checkout and supplied the
+complete successful output. The refresh-token errors in the final test are
+expected: it intentionally expires a session and verifies safe recovery.
+The sale start/end appeared after two page loads in that run.
+
+The Netlify preview serves the tested review commit. A hosted browser check
+confirmed product display without unsupported discount badges, add-to-cart and
+checkout rendering. Production home/shop/checkout return HTTP 200, and protected
+admin pricing redirects to sign-in. Hosted authenticated admin operations and
+scheduled cache refresh remain pending. The site still contains demo wording
+and a published TEST listing; this is not yet a customer-launch signoff.
+
+`.github/workflows/verify.yml` runs lint, generated-route typecheck, unit and
+local PostgreSQL tests, then the production build and browser suite in GitHub
+Actions. It uses no hosted secrets or Docker; browser failure traces are retained
+for seven days. CI's browser suite is bounded to ten minutes.
 
 ## Database changes actually applied
 
@@ -77,7 +92,7 @@ job remains active.
 
 ## Remaining rollout
 
-1. Publish this correction and identify every app/local server using dev.
+1. Merge this correction and verify Netlify production deploys the merged commit.
    Deploy/restart them on the corrected code. Do not activate sales yet.
 2. Once every app uses `admin_get_products`, apply
    `supabase/setup/complete_pricing_hardening.sql`. This is the deferred
@@ -86,9 +101,9 @@ job remains active.
    held-stock fields. Create no agent accounts before completing this step.
 3. Verify Auth signup/redirect settings and server-only agent/checkout settings
    described in README. Do not put secret keys in `NEXT_PUBLIC_*` variables.
-4. Run browser tests in an environment where Chromium can start, then exercise
-   preview/apply, one test sale and its end, referral checkout, and scheduled
-   cache refresh on the deployed app before activating real campaigns.
+4. Browser tests passed on the user's computer. Exercise preview/apply, one test
+   sale and its end, referral checkout, and scheduled cache refresh on the
+   deployed app before activating real campaigns.
 5. Reconcile historical migration tracking before using `supabase db push`.
    The hosted combined migration is not a repository filename. Do not replay
    old CREATE migrations or mark the deferred contract applied prematurely.
