@@ -1,0 +1,124 @@
+import type { Metadata } from "next";
+import Link from "@/components/admin/admin-link";
+import { Suspense } from "react";
+import { AccessNotice } from "@/components/admin/access-notice";
+import { AdminNav } from "@/components/admin/admin-nav";
+import { RequestScope } from "@/components/admin/agent-forms";
+import { BulkPricingTable, CreateGroupForm, GroupMaxEditor, SettingsForm } from "@/components/admin/pricing-forms";
+import { getPricingOverview, getPricingProducts, type PricingOverview, type PricingProduct } from "@/lib/admin/pricing";
+import { getAdminPageClient } from "@/lib/auth/admin";
+import { formatPrice } from "@/lib/format";
+import { formatBp } from "@/lib/pricing/rules";
+
+export const metadata: Metadata = {
+  title: "Pricing",
+};
+
+export default function PricingPage({ searchParams }: PageProps<"/admin/pricing">) {
+  return (
+    <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>
+      <Pricing searchParams={searchParams} />
+    </Suspense>
+  );
+}
+
+const INPUT =
+  "w-full rounded-md border border-line bg-white px-3 text-sm focus:border-forest focus:outline-none focus-visible:outline-2 focus-visible:outline-forest";
+const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? "";
+
+async function Pricing({ searchParams }: Pick<PageProps<"/admin/pricing">, "searchParams">) {
+  const query = await searchParams;
+  const { access, supabase } = await getAdminPageClient("/admin/pricing");
+  if (!supabase) return <AccessNotice access={access} retryHref="/admin/pricing" />;
+
+  const q = one(query.q).slice(0, 60);
+  const status = ["new", "preloved"].includes(one(query.status)) ? one(query.status) : "";
+  const mode = ["auto", "manual"].includes(one(query.mode)) ? one(query.mode) : "";
+  const group = /^[0-9a-f-]{36}$/.test(one(query.group)) ? one(query.group) : "";
+  let overview: PricingOverview | null = null;
+  let products: { total: number; items: PricingProduct[] } | null = null;
+  try {
+    [overview, products] = await Promise.all([
+      getPricingOverview(supabase),
+      getPricingProducts(supabase, { q, item_status: status || null, mode: mode || null, group_id: group || null, limit: 300 }),
+    ]);
+  } catch (error) {
+    console.error("[admin]", (error as Error).message);
+  }
+
+  return (
+    <>
+      <AdminNav current="pricing" email={access.email} />
+      <h1 className="text-2xl font-extrabold tracking-tight md:text-3xl">Pricing</h1>
+      <p className="mt-2 max-w-2xl text-sm text-ink/85">
+        Rank each pair from 0 to 100 instead of pricing it by hand: its price is the group’s maximum × score, ending in your
+        price ending. Products stay on their manual price until you opt them in. Nothing changes without a preview you confirm.
+      </p>
+      {!overview || !products ? (
+        <p role="alert" className="mt-6 text-sm text-danger">Pricing couldn’t be loaded right now. If this is a new setup, the pricing migration may not be applied yet (README, “Score pricing and sales”).</p>
+      ) : (
+        <RequestScope>
+          <div className="mt-6 space-y-10">
+            <section aria-labelledby="status-heading" className="space-y-2">
+              <h2 id="status-heading" className="text-lg font-bold">At a glance</h2>
+              <ul className="grid gap-2 text-sm sm:grid-cols-4">
+                <li className="rounded-md bg-cream p-3"><strong className="block text-xl">{overview.counts.auto}</strong>automatic</li>
+                <li className="rounded-md bg-cream p-3"><strong className="block text-xl">{overview.counts.manual}</strong>manual</li>
+                <li className={`rounded-md p-3 ${overview.counts.out_of_date ? "bg-danger/10" : "bg-cream"}`}><strong className="block text-xl">{overview.counts.out_of_date}</strong>automatic prices out of date</li>
+                <li className="rounded-md bg-cream p-3"><strong className="block text-xl">{overview.counts.unknown_cost}</strong>published with unknown cost</li>
+              </ul>
+              {overview.agents.enabled > 0 ? (
+                <p className="text-xs text-muted">
+                  Enabled agent codes: {overview.agents.terms.map((t) => `${t.agents} × ${formatBp(t.discount_bp)} off / ${formatBp(t.commission_bp)} commission${t.applies_to_sale_items ? "" : " (not on sale items)"}`).join("; ")}.
+                </p>
+              ) : null}
+            </section>
+
+            <section aria-labelledby="groups-heading" className="space-y-4">
+              <h2 id="groups-heading" className="text-lg font-bold">Groups and maximum prices</h2>
+              <GroupMaxEditor groups={overview.groups} outOfDate={overview.counts.out_of_date} />
+              <CreateGroupForm />
+            </section>
+
+            <section aria-labelledby="bulk-heading" className="space-y-4">
+              <h2 id="bulk-heading" className="text-lg font-bold">Set up products</h2>
+              <form className="grid gap-2 sm:grid-cols-[1fr_9rem_9rem_12rem_auto] sm:items-end" action="/admin/pricing">
+                <label className="text-xs font-semibold">Search<input name="q" defaultValue={q} className={`${INPUT} mt-1 h-10 font-normal`} placeholder="Name, brand or item code" /></label>
+                <label className="text-xs font-semibold">Type
+                  <select name="status" defaultValue={status} className={`${INPUT} mt-1 h-10 font-normal`}>
+                    <option value="">All</option><option value="new">New</option><option value="preloved">Pre-loved</option>
+                  </select>
+                </label>
+                <label className="text-xs font-semibold">Pricing
+                  <select name="mode" defaultValue={mode} className={`${INPUT} mt-1 h-10 font-normal`}>
+                    <option value="">All</option><option value="auto">Automatic</option><option value="manual">Manual</option>
+                  </select>
+                </label>
+                <label className="text-xs font-semibold">Group
+                  <select name="group" defaultValue={group} className={`${INPUT} mt-1 h-10 font-normal`}>
+                    <option value="">All</option>
+                    {overview.groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select>
+                </label>
+                <button className="btn btn-outline h-10" type="submit">Filter</button>
+              </form>
+              <p className="text-xs text-muted">{products.total} product(s){products.total > products.items.length ? `, first ${products.items.length} shown` : ""}. Archived products are left out.</p>
+              <BulkPricingTable products={products.items} groups={overview.groups} settings={overview.settings} />
+            </section>
+
+            <section aria-labelledby="settings-heading" className="space-y-4">
+              <h2 id="settings-heading" className="text-lg font-bold">Settings</h2>
+              <p className="text-sm text-muted">
+                Currently prices end in {overview.settings.price_ending_rupees}
+                {overview.settings.min_profit_paisa !== null ? `; minimum profit ${formatPrice(overview.settings.min_profit_paisa / 100)}` : ""}
+                {overview.settings.min_margin_bp !== null ? `; minimum margin ${formatBp(overview.settings.min_margin_bp)}` : ""}. Sales:{" "}
+                <Link href="/admin/sales" className="font-semibold text-forest link-underline">coverage and campaigns</Link>.
+              </p>
+              <SettingsForm settings={overview.settings} />
+            </section>
+          </div>
+        </RequestScope>
+      )}
+    </>
+  );
+}

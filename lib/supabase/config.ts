@@ -49,6 +49,23 @@ export const SESSION_COOKIE_OPTIONS = {
 } as const;
 
 /**
+ * Auth cookie settings for the sales-agent area (/agent). A separate cookie
+ * name and path from the admin session: an agent's login is never sent to
+ * /admin (or the storefront), an admin's never to /agent, and signing in or
+ * out of one area leaves the other alone.
+ */
+export const AGENT_SESSION_COOKIE_OPTIONS = {
+  name: "kns-agent-auth",
+  path: "/agent",
+  httpOnly: true,
+  sameSite: "lax",
+  secure: process.env.NODE_ENV === "production",
+} as const;
+
+/** The agent area's auth cookies (the session, split into chunks, and the PKCE verifier). */
+export const AGENT_AUTH_COOKIE = /^kns-agent-auth(\.\d+|-code-verifier)?$/;
+
+/**
  * fetch for Supabase clients: keeps requests out of Next's fetch cache, which
  * persists across builds. Catalogue reads are cached explicitly with
  * "use cache"; session requests must never be cached at all.

@@ -6,7 +6,10 @@ const LINKS = [
   { key: "products", href: "/admin/products", label: "Products" },
   { key: "new", href: "/admin/products/new", label: "Add product" },
   { key: "scan", href: "/admin/scan", label: "Scan" },
+  { key: "pricing", href: "/admin/pricing", label: "Pricing" },
+  { key: "sales", href: "/admin/sales", label: "Sales" },
   { key: "orders", href: "/admin/orders", label: "Orders" },
+  { key: "agents", href: "/admin/agents", label: "Agents" },
   { key: "settings", href: "/admin/settings", label: "Settings" },
 ] as const;
 

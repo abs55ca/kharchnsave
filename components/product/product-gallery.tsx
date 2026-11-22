@@ -1,16 +1,52 @@
 "use client";
 
 import Image from "next/image";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
+import { largestLoadedCopy, loadedDirectly } from "@/lib/catalog/loaded-photo";
 import type { ProductImage } from "@/lib/catalog/types";
+
+const noSubscription = () => () => {};
+
+/**
+ * A copy of `src` this page already downloaded (the catalogue card's, or a
+ * thumbnail's), shown behind the main photo until it loads. Read while
+ * rendering: after a tap on a catalogue card, the first render already has
+ * it. Null on the server and for the first photo of a page loaded directly.
+ */
+function useLoadedCopy(src: string, first: boolean) {
+  return useSyncExternalStore(
+    noSubscription,
+    () => {
+      const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+      if (first && loadedDirectly(location.pathname, navigation?.name, location.origin)) return null;
+      return largestLoadedCopy(src, performance.getEntriesByType("resource") as PerformanceResourceTiming[], location.origin);
+    },
+    () => null,
+  );
+}
 
 export function ProductGallery({ images, name }: { images: ProductImage[]; name: string }) {
   const [index, setIndex] = useState(0);
   const current = images[index];
+  const loadedCopy = useLoadedCopy(current.src, index === 0);
 
   return (
     <div className="flex flex-col gap-3">
       <div className="relative aspect-square overflow-hidden rounded-lg bg-cream">
+        {loadedCopy ? (
+          // A plain <img> on purpose: this exact URL is already in the
+          // browser's cache; next/image would ask for a different size.
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            key={loadedCopy}
+            src={loadedCopy}
+            alt=""
+            aria-hidden="true"
+            decoding="sync"
+            className="absolute inset-0 size-full object-cover"
+            style={current.focus ? { objectPosition: current.focus } : undefined}
+          />
+        ) : null}
         <Image
           key={current.src}
           src={current.src}

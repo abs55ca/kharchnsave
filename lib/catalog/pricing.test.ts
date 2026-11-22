@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { discountPercent, isOnSale, pricesFromColumns, saleBadgeText } from "./pricing";
+import { discountPercent, isOnSale, pricesFromColumns, saleBadgeText, savings, shopPrices } from "./pricing";
 
 describe("discount badge", () => {
   it("shows whole percentages", () => {
@@ -52,5 +52,25 @@ describe("prices from the database", () => {
   it("knows when a product is on sale", () => {
     expect(isOnSale({ price: 1600, regularPrice: 2000 })).toBe(true);
     expect(isOnSale({ price: 2000, regularPrice: null })).toBe(false);
+  });
+});
+
+describe("what the shop shows (honest discounts)", () => {
+  it("shows a crossed-out price only with a supported reference price", () => {
+    expect(shopPrices({ price_paisa: 249500, sale_price_paisa: 219500, reference_price_paisa: 249500 })).toEqual({ price: 2195, regularPrice: 2495, referralExcluded: false });
+    // On sale, but the database found no supporting price history: the selling price only, no badge.
+    expect(shopPrices({ price_paisa: 249500, sale_price_paisa: 219500, reference_price_paisa: null })).toEqual({ price: 2195, regularPrice: null, referralExcluded: false });
+    expect(shopPrices({ price_paisa: 249500, sale_price_paisa: 219500 })).toMatchObject({ regularPrice: null });
+    // A reference that isn't above the sale price is never shown.
+    expect(shopPrices({ price_paisa: 249500, sale_price_paisa: 219500, reference_price_paisa: 219500 })).toMatchObject({ regularPrice: null });
+    // Not on sale: no reference, whatever the column says.
+    expect(shopPrices({ price_paisa: 249500, sale_price_paisa: null, reference_price_paisa: 300000 })).toMatchObject({ price: 2495, regularPrice: null });
+    expect(shopPrices({ price_paisa: 139500, sale_price_paisa: 99500, reference_price_paisa: 139500, referral_excluded: true }).referralExcluded).toBe(true);
+  });
+
+  it("saving = reference − price; percent rounded down", () => {
+    expect(savings({ price: 2195, regularPrice: 2495 })).toEqual({ rupees: 300, percent: 12 });
+    expect(savings({ price: 1599, regularPrice: 2000 })).toEqual({ rupees: 401, percent: 20 });
+    expect(savings({ price: 2195, regularPrice: null })).toBeNull();
   });
 });

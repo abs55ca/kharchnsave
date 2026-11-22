@@ -22,7 +22,7 @@ import {
   type PublicationStatus,
 } from "@/lib/admin/products";
 import { getAdminClient, type AdminAccess, type AdminSessionClient } from "@/lib/auth/admin";
-import { photoObjectPath, PRODUCT_PHOTOS_BUCKET, UUID_PATTERN } from "@/lib/catalog/photos";
+import { photoCacheTag, photoObjectPath, PRODUCT_PHOTOS_BUCKET, UUID_PATTERN } from "@/lib/catalog/photos";
 import { fullName } from "@/lib/catalog/product-utils";
 import { CATALOGUE_TAG } from "@/lib/catalog/supabase-catalog";
 
@@ -182,6 +182,8 @@ export async function saveProduct(_previous: ProductFormState, formData: FormDat
   // The save is committed. Clean-up and the refreshed copy are best effort.
   await removeStoredPhotos(supabase, productId, removedPaths);
   updateTag(CATALOGUE_TAG);
+  // Removed photos stop being served from the CDN too (app/product-photos).
+  if (removedPaths.length > 0) updateTag(photoCacheTag(productId));
   try {
     const product = await getEditableProduct(supabase, productId);
     if (product) return { status: "saved", message: "Saved.", errors: {}, product };
@@ -315,6 +317,8 @@ export async function changeProductStatus(formData: FormData): Promise<StatusCha
     }
 
     updateTag(CATALOGUE_TAG);
+    // Unpublished or archived: its photos stop being served from the CDN too.
+    if (status !== "published") updateTag(photoCacheTag(productId));
     const product = await getEditableProduct(supabase, productId);
     if (!product) return { ok: false, error: "The change was saved, but the product couldn’t be reloaded. Reload the page." };
     return { ok: true, product };

@@ -1,6 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 import { CATALOGUE_TAG } from "@/lib/catalog/supabase-catalog";
-import { parsePhotoPath, PRODUCT_PHOTOS_BUCKET } from "@/lib/catalog/photos";
+import { parsePhotoPath, photoCacheTag, PRODUCT_PHOTOS_BUCKET } from "@/lib/catalog/photos";
 import { getSupabase } from "@/lib/supabase/server";
 
 /**
@@ -12,7 +12,35 @@ import { getSupabase } from "@/lib/supabase/server";
  * archived listings and unused uploads are 404. The bytes are cached with the
  * catalogue (same tag, same lifetime), so publishing or unpublishing refreshes
  * them together. next/image optimises these like any other local image.
+ * CDN and browser caching: PHOTO_CACHE_HEADERS below.
  */
+
+/*
+ * Caching, bounded. A photo's address never changes what it shows (every
+ * upload gets a new image id; uploads never overwrite), so caching is safe
+ * while the product is public; the bounds limit how long a copy can outlive
+ * an unpublish if a purge doesn't happen:
+ *   - Netlify's shared ("durable") CDN cache: at most 4 hours (s-maxage=14400),
+ *     no stale serving. Netlify's image CDN fetches this route for each photo
+ *     size an edge node hasn't made yet; a shared-cache hit avoids a function
+ *     run (measured 1.7 to 2 seconds per photo on 2026-11-17). Netlify's
+ *     Next.js runtime keeps an app-set Netlify-CDN-Cache-Control as it is
+ *     (from its source; not yet observed on the host).
+ *   - Browsers: at most 1 hour.
+ *   - Netlify-Cache-Tag: the admin actions call updateTag(photoCacheTag(id))
+ *     on unpublish, archive or photo removal; Netlify's runtime source passes
+ *     it to Netlify's purge API (not yet observed on the host). A deploy
+ *     clears the cache too.
+ * These headers do NOT bound Netlify's RESIZED copies (/_next/image): Netlify
+ * documents that source headers don't control its own image cache, and
+ * resized copies were measured stored for about a year per edge node. Their
+ * retention and invalidation are unverified until tested on the host
+ * (README, "Product photos").
+ */
+const PHOTO_CACHE_HEADERS = {
+  "Cache-Control": "public, max-age=3600",
+  "Netlify-CDN-Cache-Control": "public, durable, s-maxage=14400",
+} as const;
 
 // "Not found" is cached too (as null) and refreshed with the catalogue.
 async function readPublishedPhoto(path: string): Promise<Uint8Array | null> {
@@ -49,9 +77,8 @@ export async function GET(_request: Request, { params }: RouteContext<"/product-
   return new Response(bytes as Uint8Array<ArrayBuffer>, {
     headers: {
       "Content-Type": "image/webp",
-      // Short, so an unpublished listing's photos stop being served soon
-      // (next/image keeps its optimised copies for longer; see README).
-      "Cache-Control": "public, max-age=60, must-revalidate",
+      ...PHOTO_CACHE_HEADERS,
+      "Netlify-Cache-Tag": photoCacheTag(photo.productId),
       "X-Content-Type-Options": "nosniff",
     },
   });

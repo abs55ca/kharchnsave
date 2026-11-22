@@ -12,7 +12,7 @@ import { CATALOGUE_TAG } from "@/lib/catalog/supabase-catalog";
 /*
  * Places a cash-on-delivery order. A Server Action is a public endpoint, so
  * nothing here trusts the browser: lib/checkout/submit.ts checks the input,
- * and the database recalculates prices, availability and totals. Next.js
+ * and the database recalculates prices, availability, discounts and totals. Next.js
  * rejects cross-site POSTs to actions (Origin check). Nothing personal is
  * logged; failures are logged by database error code only.
  */

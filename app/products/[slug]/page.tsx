@@ -33,7 +33,7 @@ export async function generateMetadata({
   return {
     title: fullName(product),
     description: `${STATUS_LABELS[product.status]} ${product.name} — ${formatPrice(product.price)}${
-      isOnSale(product) ? ` (sale; regular price ${formatPrice(product.regularPrice!)})` : ""
+      isOnSale(product) ? ` (sale; was ${formatPrice(product.regularPrice!)})` : ""
     }. ${product.description}`,
   };
 }
@@ -107,6 +107,9 @@ async function ProductDetails({ params }: Pick<PageProps<"/products/[slug]">, "p
             <ProductPrice product={product} size="page" />
             {isOnSale(product) ? <SaleBadge text={saleBadgeText(product.regularPrice!, product.price)} /> : null}
           </div>
+          {product.referralExcluded ? (
+            <p className="mt-2 text-sm text-muted">Referral codes don’t apply to this item (clearance price).</p>
+          ) : null}
 
           <div className="mt-6 border-t border-line pt-6">
             <PurchasePanel product={product} />

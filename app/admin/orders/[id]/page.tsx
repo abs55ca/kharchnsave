@@ -3,8 +3,11 @@ import Link from "@/components/admin/admin-link";
 import { randomUUID } from "node:crypto";
 import { Suspense } from "react";
 import { AccessNotice } from "@/components/admin/access-notice";
+import { CommissionHoldForm } from "@/components/admin/agent-forms";
 import { AdminNav } from "@/components/admin/admin-nav";
 import { OrderActionForm } from "@/components/admin/order-action-form";
+import { formatPercent } from "@/lib/agents/code";
+import { getOrderReferral, STATE_LABELS, type OrderReferral } from "@/lib/admin/agents";
 import { getOrder, type AdminOrder } from "@/lib/admin/orders";
 import { getAdminPageClient } from "@/lib/auth/admin";
 import { UUID_PATTERN } from "@/lib/catalog/photos";
@@ -36,10 +39,11 @@ async function Order({ params }: Pick<PageProps<"/admin/orders/[id]">, "params">
   if (!supabase) return <AccessNotice access={access} retryHref={href} />;
 
   let order: AdminOrder | null = null;
+  let referral: OrderReferral | null = null;
   let failed = false;
   if (UUID_PATTERN.test(id)) {
     try {
-      order = await getOrder(supabase, id);
+      [order, referral] = await Promise.all([getOrder(supabase, id), getOrderReferral(supabase, id)]);
     } catch (error) {
       console.error("[admin]", (error as Error).message);
       failed = true;
@@ -57,13 +61,13 @@ async function Order({ params }: Pick<PageProps<"/admin/orders/[id]">, "params">
       ) : !order ? (
         <p className="mt-6 text-sm">Order not found.</p>
       ) : (
-        <OrderDetail order={order} />
+        <OrderDetail order={order} referral={referral} />
       )}
     </>
   );
 }
 
-function OrderDetail({ order }: { order: AdminOrder }) {
+function OrderDetail({ order, referral }: { order: AdminOrder; referral: OrderReferral | null }) {
   // A fresh request id per form, per render: a double submit is applied once.
   const form = (action: string) => ({ action, orderId: order.id, version: order.version, requestId: randomUUID() });
   const phone = order.customer_phone;
@@ -257,12 +261,63 @@ function OrderDetail({ order }: { order: AdminOrder }) {
         </ul>
         <dl className="mt-4 space-y-1 border-t border-line pt-3">
           <div className="flex justify-between"><dt className="text-muted">Subtotal</dt><dd>{rupees(order.subtotal_paisa)}</dd></div>
+          {order.discount_paisa > 0 ? (
+            <div className="flex justify-between"><dt className="text-muted">Referral discount</dt><dd>−{rupees(order.discount_paisa)}</dd></div>
+          ) : null}
           <div className="flex justify-between"><dt className="text-muted">Delivery</dt><dd>{order.delivery_paisa === 0 ? "Free" : rupees(order.delivery_paisa)}</dd></div>
           <div className="flex justify-between font-semibold"><dt>Total</dt><dd>{rupees(order.total_paisa)}</dd></div>
           {order.collected_paisa !== null ? <div className="flex justify-between"><dt className="text-muted">Collected</dt><dd>{rupees(order.collected_paisa)}</dd></div> : null}
           {order.refunded_paisa !== null ? <div className="flex justify-between"><dt className="text-muted">Refunded</dt><dd>{rupees(order.refunded_paisa)}</dd></div> : null}
         </dl>
+        {referral ? <ReferralSummary referral={referral} /> : null}
       </section>
+    </div>
+  );
+}
+
+/** The referral saved on this order (the terms then, not the agent's current terms). */
+function ReferralSummary({ referral: r }: { referral: OrderReferral }) {
+  return (
+    <div className="mt-5 border-t border-line pt-4">
+      <h3 className="font-bold">Referral</h3>
+      <p className="mt-1">
+        Code <span className="font-mono">{r.code}</span> ·{" "}
+        <Link href={`/admin/agents/${r.agent_id}`} className="font-semibold text-forest link-underline">{r.agent_display_name}</Link>
+        {r.agent_username_then !== r.agent_username_now ? <span className="text-muted"> (then @{r.agent_username_then})</span> : null}
+      </p>
+      <p className="mt-1 text-xs text-muted">
+        Terms saved with the order (v{r.terms_version}): {formatPercent(r.discount_bp)} off, {formatPercent(r.commission_bp)} commission, sale items{" "}
+        {r.applies_to_sale_items ? "included" : "excluded"}; held {r.hold_hours / 24} days after delivery.
+      </p>
+      <dl className="mt-2 space-y-1">
+        <div className="flex justify-between"><dt className="text-muted">Qualifying products</dt><dd>{rupees(r.eligible_subtotal_paisa)}</dd></div>
+        <div className="flex justify-between"><dt className="text-muted">Commission basis</dt><dd>{rupees(r.commission_basis_paisa)}</dd></div>
+        <div className="flex justify-between"><dt className="text-muted">Commission</dt><dd>{rupees(r.commission_paisa)}</dd></div>
+        {r.reversed_paisa > 0 ? <div className="flex justify-between text-danger"><dt>Reversed</dt><dd>−{rupees(r.reversed_paisa)}</dd></div> : null}
+        <div className="flex justify-between"><dt className="text-muted">Status</dt><dd>{STATE_LABELS[r.state]}</dd></div>
+        {r.release_at ? <div className="flex justify-between"><dt className="text-muted">Release</dt><dd>{dateTime.format(new Date(r.release_at))}</dd></div> : null}
+      </dl>
+      {r.hold_history?.length ? (
+        <ul className="mt-2 space-y-0.5 text-xs">
+          {r.hold_history.map((h, i) => (
+            <li key={i}>
+              {h.action === "hold" ? "Held" : "Released"} {dateTime.format(new Date(h.created_at))}: {h.reason}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {r.on_hold || ["awaiting_delivery", "held", "awaiting_payment", "available"].includes(r.state) ? (
+        <div className="mt-3">
+          <CommissionHoldForm orderId={r.order_id} onHold={r.on_hold} expectedEventId={r.latest_hold_event_id} />
+        </div>
+      ) : null}
+      <ul className="mt-2 space-y-0.5 text-xs text-muted">
+        {r.lines.map((l) => (
+          <li key={l.line_no}>
+            Line {l.line_no}: {l.eligible ? `discount −${rupees(l.discount_paisa)}, commission ${rupees(l.commission_paisa)}` : "doesn’t qualify (sale item)"}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

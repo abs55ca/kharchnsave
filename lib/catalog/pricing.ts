@@ -44,3 +44,32 @@ export function pricesFromColumns(row: { price_paisa: number; sale_price_paisa?:
     regularPrice: onSale ? row.price_paisa / 100 : null,
   };
 }
+
+/**
+ * What the shop shows (lib/catalog/supabase-catalog.ts). A crossed-out "was"
+ * price and a % badge need a SUPPORTED reference price: reference_price_paisa,
+ * which only the database sets, from genuine price history
+ * (supabase/migrations/20261121120000_score_pricing_and_sales.sql). It is never
+ * worked out from the discount, and a current regular price isn't proof the
+ * product was ever sold at it. Without one, a product on sale shows just the
+ * price it costs (regularPrice null: no badge).
+ */
+export function shopPrices(row: { price_paisa: number; sale_price_paisa?: number | null; reference_price_paisa?: number | null; referral_excluded?: boolean | null }) {
+  const { price } = pricesFromColumns(row);
+  const pays = Math.round(price * 100);
+  const reference = row.reference_price_paisa;
+  const onSale = pays < row.price_paisa;
+  return {
+    price,
+    regularPrice: onSale && typeof reference === "number" && reference > pays ? reference / 100 : null,
+    referralExcluded: row.referral_excluded === true,
+  };
+}
+
+/** The saving shown next to the price: rupees and a rounded-down percentage (never exaggerated). */
+export function savings(product: { price: number; regularPrice: number | null }) {
+  if (!isOnSale(product)) return null;
+  const reference = toPaisa(product.regularPrice!);
+  const saved = reference - toPaisa(product.price);
+  return { rupees: saved / 100, percent: Math.floor((saved * 100) / reference) };
+}

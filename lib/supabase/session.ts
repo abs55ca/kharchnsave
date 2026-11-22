@@ -2,10 +2,11 @@ import "server-only";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { connection } from "next/server";
-import { getSupabaseConfig, SESSION_COOKIE_OPTIONS, sessionFetch } from "./config";
+import { AGENT_SESSION_COOKIE_OPTIONS, getSupabaseConfig, SESSION_COOKIE_OPTIONS, sessionFetch } from "./config";
 
 /**
- * Session-aware Supabase client for the admin area. It reads the signed-in
+ * Session-aware Supabase client for the admin area (and, with "agent", the
+ * sales-agent area, whose session lives in its own cookie). It reads the signed-in
  * user's auth cookies, so it must be created per request and its results
  * must never be cached or shared ("use cache" scopes can't read cookies, by
  * design). The anonymous catalogue client in ./server.ts is kept separate.
@@ -19,13 +20,14 @@ import { getSupabaseConfig, SESSION_COOKIE_OPTIONS, sessionFetch } from "./confi
  * a runtime prefetch, where the current time isn't available, so wait for
  * the actual request first.
  */
-export async function createSessionClient() {
+export async function createSessionClient(area: "admin" | "agent" = "admin") {
   await connection();
   const { url, key } = getSupabaseConfig();
   const cookieStore = await cookies();
 
   return createServerClient(url, key, {
-    cookieOptions: SESSION_COOKIE_OPTIONS,
+    // The agent area (/agent) has its own cookie name and path; see config.ts.
+    cookieOptions: area === "agent" ? AGENT_SESSION_COOKIE_OPTIONS : SESSION_COOKIE_OPTIONS,
     cookies: {
       getAll() {
         return cookieStore.getAll();

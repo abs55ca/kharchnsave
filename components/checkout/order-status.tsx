@@ -122,6 +122,12 @@ export function OrderStatus() {
             <dt className="text-muted">Subtotal</dt>
             <dd>{rupees(order.subtotal_paisa)}</dd>
           </div>
+          {order.discount_paisa > 0 ? (
+            <div className="flex justify-between text-forest">
+              <dt>Referral discount{order.referral_code ? ` (${order.referral_code})` : ""}</dt>
+              <dd>−{rupees(order.discount_paisa)}</dd>
+            </div>
+          ) : null}
           <div className="flex justify-between">
             <dt className="text-muted">Delivery</dt>
             <dd>{order.delivery_paisa === 0 ? "Free" : rupees(order.delivery_paisa)}</dd>

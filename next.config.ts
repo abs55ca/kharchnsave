@@ -20,6 +20,17 @@ const nextConfig: NextConfig = {
       bodySizeLimit: "4.5mb",
     },
   },
+  images: {
+    // The widths next/image may ask for. Each width is a separate copy that
+    // the image CDN makes per edge node on first request (about a second
+    // on Netlify), so fewer widths mean more requests answered from a copy
+    // already made. Defaults were 640…3840 and 32…384 (15 widths).
+    // Phones: 828 (2x), 1080 and 1200 (3x). Desktop gallery and hero: 1920,
+    // 2048. Thumbnails, cart and grid cards: 96, 256, 384.
+    deviceSizes: [640, 828, 1080, 1200, 1920, 2048],
+    imageSizes: [96, 256, 384],
+    qualities: [75],
+  },
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {

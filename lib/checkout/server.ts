@@ -16,6 +16,9 @@ export type OrderBody = {
   delivery_paisa: number;
   total_paisa: number;
   customer: Customer;
+  /** Only with a code: the normalised code and the discount the customer saw. */
+  referral_code?: string;
+  discount_paisa?: number;
 };
 
 export type PlaceResult =
@@ -42,8 +45,8 @@ export function logDbError(where: string, error: { code?: string } | null) {
   console.error(`[checkout] ${where} failed: ${error?.code || "no code"}`);
 }
 
-export const quoteOrder = (secret: string, lines: OrderLine[], city: string | null) =>
-  rpc<Quote>("quote_order", { p_gateway_key: secret, p_lines: lines, p_city: city });
+export const quoteOrder = (secret: string, lines: OrderLine[], city: string | null, referralCode: string | null = null) =>
+  rpc<Quote>("quote_order", { p_gateway_key: secret, p_lines: lines, p_city: city, p_referral_code: referralCode });
 
 export const registerAttempt = (secret: string, client: string | null, kind: "place" | "lookup" | "quote") =>
   rpc<AttemptResult>("checkout_register_attempt", { p_gateway_key: secret, p_client: client, p_kind: kind });

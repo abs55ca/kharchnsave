@@ -61,8 +61,15 @@ export type Product = {
    * else should.
    */
   price: number;
-  /** The regular price while on sale (higher than `price`); null when not on sale. */
+  /**
+   * The supported "was" price while on sale (higher than `price`), from
+   * genuine price history (lib/catalog/pricing.ts, shopPrices); null when not
+   * on sale, or on sale without a supported reference (then no badge or
+   * crossed-out price is shown).
+   */
   regularPrice: number | null;
+  /** Referral-code discounts don't apply to this item (a clearance sale said so). */
+  referralExcluded?: boolean;
   description: string;
   /** Light-up soles and whether they work; null if it has none or it isn't recorded. */
   lightUp: LightUp | null;

@@ -1,3 +1,4 @@
+import { CODE_INPUT_MAX, normalizeReferralCode } from "@/lib/agents/code";
 import { isUncertain, type DbResult } from "@/lib/db/retry";
 import {
   CHECKOUT_KEY_PATTERN,
@@ -15,7 +16,8 @@ import type { CustomerOrderView, Quote } from "./types";
  * Placing an order, step by step (the Server Action in app/checkout/actions.ts
  * supplies the real dependencies; the unit tests supply fakes):
  *
- * 1. Check the input.
+ * 1. Check the input. A referral code is normalised (lib/agents/code.ts) and
+ *    sent with the discount the customer saw; the database checks both.
  * 2. Has this checkout key already placed an order? If so, and the contents
  *    are the same, that order is the answer (a retry after a lost response).
  *    The same key with different contents is refused, never accepted.
@@ -39,6 +41,9 @@ export type SubmitInput = {
   totalPaisa: unknown;
   customer: Partial<CustomerInput>;
   turnstileToken: unknown;
+  /** Optional: the referral code as typed, and the discount shown with it. */
+  referralCode?: unknown;
+  discountPaisa?: unknown;
 };
 
 export type SubmitResult =
@@ -88,6 +93,11 @@ export async function submitOrder(input: SubmitInput, deps: SubmitDeps): Promise
   const key = typeof input.key === "string" && CHECKOUT_KEY_PATTERN.test(input.key) ? input.key : null;
   const lines = parseOrderLines(input.lines);
   if (!key || !lines || !isPaisa(input.deliveryPaisa) || !isPaisa(input.totalPaisa)) return { status: "bad_request" };
+  const rawCode = input.referralCode ?? null;
+  if (rawCode !== null && (typeof rawCode !== "string" || rawCode.length > CODE_INPUT_MAX)) return { status: "bad_request" };
+  const referralCode = normalizeReferralCode(rawCode);
+  const discount = input.discountPaisa ?? 0;
+  if (!isPaisa(discount) || (referralCode === null && discount !== 0)) return { status: "bad_request" };
   const checked = validateCustomer(input.customer ?? {});
   if (!checked.ok) return { status: "invalid", errors: checked.errors };
   const order: OrderBody = {
@@ -95,6 +105,7 @@ export async function submitOrder(input: SubmitInput, deps: SubmitDeps): Promise
     delivery_paisa: input.deliveryPaisa,
     total_paisa: input.totalPaisa,
     customer: checked.customer,
+    ...(referralCode !== null ? { referral_code: referralCode, discount_paisa: discount } : {}),
   };
 
   // 2. Already placed with this key?

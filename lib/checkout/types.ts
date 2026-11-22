@@ -1,5 +1,6 @@
 /* Shapes returned by the checkout database functions (see
-   supabase/migrations/20261031130000_guest_orders.sql). */
+   supabase/migrations/20261031130000_guest_orders.sql and
+   20261118120100_referral_checkout.sql). */
 
 export type QuoteLine = {
   sku: string;
@@ -13,15 +14,43 @@ export type QuoteLine = {
   available: number;
   /** What the customer pays: the sale price while on sale. */
   unit_price_paisa: number | null;
-  /** The regular price, for display (higher than unit_price_paisa while on sale). */
+  /** The regular price (higher than unit_price_paisa while on sale). Not shown as a "was" price: see reference_price_paisa. */
   regular_price_paisa?: number | null;
+  /** The supported "was" price while on sale (genuine price history); null or absent: show no crossed-out price. */
+  reference_price_paisa?: number | null;
+  /** True for a clearance item whose sale excludes referral-code discounts. */
+  referral_excluded?: boolean;
   price_changed: boolean;
   seen_price_paisa: number;
+  /** While a referral code applies: whether this line qualifies for its discount; otherwise null. */
+  referral_eligible: boolean | null;
+  /** This line's share of the referral discount (0 without one). */
+  discount_paisa: number;
+};
+
+/**
+ * The referral code on a quote. Only the code and its customer-facing terms:
+ * never who the agent is or what they earn.
+ *   ok                 applies (at least one line qualifies)
+ *   invalid            no such code (or malformed)
+ *   disabled           the code isn't accepted at the moment
+ *   no_eligible_items  nothing in this cart qualifies (e.g. sale items)
+ */
+export type QuoteReferral = {
+  code: string;
+  status: "ok" | "invalid" | "disabled" | "no_eligible_items";
+  discount_bp?: number;
+  applies_to_sale_items?: boolean;
 };
 
 export type Quote = {
   lines: QuoteLine[];
   subtotal_paisa: number;
+  /** Referral discount (0 without a code). */
+  discount_paisa: number;
+  /** subtotal - discount: what free delivery is judged on. */
+  merchandise_paisa: number;
+  referral: QuoteReferral | null;
   delivery_status: "ok" | "not_configured" | "city_required" | "not_served";
   delivery_paisa: number;
   total_paisa: number;
@@ -54,6 +83,8 @@ export type CustomerOrderView = {
   courier: string | null;
   tracking_number: string | null;
   subtotal_paisa: number;
+  discount_paisa: number;
+  referral_code: string | null;
   delivery_paisa: number;
   total_paisa: number;
   items: {
@@ -65,6 +96,7 @@ export type CustomerOrderView = {
     quantity: number;
     unit_price_paisa: number;
     line_total_paisa: number;
+    discount_paisa: number;
   }[];
 };
 

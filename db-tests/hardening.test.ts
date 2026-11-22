@@ -232,6 +232,8 @@ describe("2. online quotes reveal nothing about unpublished products", () => {
     sku, status: "unavailable", name: null, brand: null, size_eu: null, item_status: null, condition: null,
     quantity, allowed_quantity: 0, available: 0, unit_price_paisa: null, regular_price_paisa: null,
     price_changed: false, seen_price_paisa: seen,
+    // Since 20261118120100_referral_checkout.sql: no code applies, nothing discounted.
+    referral_eligible: null, discount_paisa: 0,
   });
 
   it("draft, archived and nonexistent SKUs look the same; published ones show their (sale) price", async () => {
@@ -491,7 +493,7 @@ describe("5. new functions are not callable by API roles unless granted", () => 
   it("existing intended grants still work", async () => {
     const { rows } = await db.query(`
       select has_function_privilege('anon', 'public.place_cod_order(text, text, jsonb)', 'execute') as anon_place,
-             has_function_privilege('anon', 'public.quote_order(text, jsonb, text)', 'execute') as anon_quote,
+             has_function_privilege('anon', 'public.quote_order(text, jsonb, text, text)', 'execute') as anon_quote,
              has_function_privilege('authenticated', 'public.admin_save_product(uuid, integer, jsonb, jsonb, jsonb)', 'execute') as auth_save,
              has_function_privilege('authenticated', 'public.is_catalogue_admin()', 'execute') as auth_is_admin,
              has_function_privilege('anon', 'public.admin_save_product(uuid, integer, jsonb, jsonb, jsonb)', 'execute') as anon_save,

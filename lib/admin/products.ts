@@ -338,6 +338,14 @@ const HINT_MESSAGES: Record<string, { field?: keyof FieldErrors; message: string
   },
   sku_locked: { field: "sizes", message: "Sizes can’t change once the product has been published." },
   too_many_photos: { field: "photos", message: "A product can have at most 12 photos." },
+  auto_priced: {
+    field: "price",
+    message: "This product is priced automatically from its score. Change it in “Pricing” on this page, or switch it to a manual price there.",
+  },
+  campaign_price: {
+    field: "salePrice",
+    message: "This product is in a running sale. Remove it from the sale (Sales) or end the sale before changing its prices here.",
+  },
   bad_transition: { message: "That status change isn’t allowed. Reload the page and try again." },
   barcode_locked: { message: "Barcodes can’t be changed or removed. Reload the page and try again." },
   item_code_reserved: {

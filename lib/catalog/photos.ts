@@ -27,6 +27,15 @@ export function parsePhotoPath(productId: string, file: string) {
   return { productId, imageId: match[1], path: photoObjectPath(productId, match[1]) };
 }
 
+/**
+ * CDN cache tag on every shopper photo response of one product
+ * (app/product-photos). The admin actions purge it whenever that product's
+ * photos must stop being served: unpublish, archive, or a photo removed.
+ */
+export function photoCacheTag(productId: string) {
+  return `product-photos-${productId}`;
+}
+
 /** Public URL path for a published product's photo (optimised by next/image). */
 export function productPhotoSrc(storagePath: string) {
   return `/product-photos/${storagePath}`;

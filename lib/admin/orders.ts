@@ -39,6 +39,7 @@ export type AdminOrder = OrderListItem & {
   landmark: string | null;
   delivery_note: string | null;
   subtotal_paisa: number;
+  discount_paisa: number;
   delivery_paisa: number;
   courier: string | null;
   tracking_number: string | null;

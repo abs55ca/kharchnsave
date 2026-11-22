@@ -44,3 +44,24 @@ export function mfaPath(next: string): string {
 export function loginPath(next: string): string {
   return next === ADMIN_HOME ? ADMIN_LOGIN : `${ADMIN_LOGIN}?next=${encodeURIComponent(next)}`;
 }
+
+export const AGENT_HOME = "/agent";
+export const AGENT_LOGIN = "/agent/login";
+/** Agent pages that work without a session (sign-in, password links). */
+export const AGENT_PUBLIC = ["/agent/login", "/agent/forgot-password", "/agent/auth"];
+
+/** Like safeAdminPath, for the agent area: a path under /agent, never a sign-in page. */
+export function safeAgentPath(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 512) return AGENT_HOME;
+  if (!value.startsWith("/") || value.startsWith("//") || /[\\\u0000-\u001f\u007f]/.test(value)) return AGENT_HOME;
+  let url: URL;
+  try {
+    url = new URL(value, BASE);
+  } catch {
+    return AGENT_HOME;
+  }
+  if (url.origin !== BASE) return AGENT_HOME;
+  const path = url.pathname;
+  if (!isUnder(path, AGENT_HOME) || AGENT_PUBLIC.some((p) => isUnder(path, p)) || isUnder(path, "/agent/set-password")) return AGENT_HOME;
+  return `${path}${url.search}${url.hash}`;
+}

@@ -149,3 +149,27 @@ describe("submitOrder", () => {
     expect(refused.logError).toHaveBeenCalledWith("place order", { code: "42501", message: "Not allowed." });
   });
 });
+
+describe("submitOrder with a referral code", () => {
+  it("sends the normalised code and the discount the customer saw", async () => {
+    const d = deps();
+    await submitOrder(input({ referralCode: " ah-med ", discountPaisa: 24500, totalPaisa: 250500 }), d);
+    expect(d.place).toHaveBeenCalledWith(KEY, expect.objectContaining({ referral_code: "AHMED", discount_paisa: 24500, total_paisa: 250500 }));
+  });
+
+  it("without a code, the order has no referral fields (unchanged requests)", async () => {
+    const d = deps();
+    await submitOrder(input({ referralCode: "   " }), d);
+    const order = vi.mocked(d.place).mock.calls[0][1] as Record<string, unknown>;
+    expect(order).not.toHaveProperty("referral_code");
+    expect(order).not.toHaveProperty("discount_paisa");
+  });
+
+  it("refuses a discount without a code, a negative discount and an oversized code", async () => {
+    for (const bad of [{ discountPaisa: 100 }, { referralCode: "AHMED", discountPaisa: -1 }, { referralCode: "A".repeat(33) }, { referralCode: 42 }]) {
+      const d = deps();
+      expect(await submitOrder(input(bad), d), JSON.stringify(bad)).toEqual({ status: "bad_request" });
+      expect(d.place).not.toHaveBeenCalled();
+    }
+  });
+});

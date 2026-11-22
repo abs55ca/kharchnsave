@@ -200,6 +200,14 @@ Notes:
 | `supabase/migrations/20261117120300_idempotent_photo_registration.sql` | `admin_add_product_image` is keyed by the image id: each registration's original request and resulting version are kept in `private.photo_registrations`; a retry with the identical request gets the original version back, anything else is refused; a retry waits for a registration still in progress |
 | `supabase/migrations/20261117120400_restrict_internal_columns.sql` | Step 2 of 2 ("contract"), applied last (stage D): signed-in users read products and sizes with the same columns as visitors (no `label_name`, `reserved`, `inventory_version`) |
 | `db-tests/hardening.test.ts` | Regression tests for the four migrations above on real PostgreSQL: quota, quotes, the permission matrix, the per-phone limit under concurrency, default privileges, photo registration retries |
+| `supabase/migrations/20261118120000_sales_agents.sql` | Sales agents: accounts (linked to Auth users), referral codes (fixed, never reused), current terms, the change log, and the admin functions to create, link, edit, suspend and enable them (see [Sales agents](#sales-agents)) |
+| `supabase/migrations/20261118120100_referral_checkout.sql` | Referral codes at checkout: the order's discount, the per-order and per-line referral snapshot, rounding, free delivery after the discount, `quote_order` with a code, `place_cod_order` with the code locked |
+| `supabase/migrations/20261118120200_commission_accounting.sql` | Commission states (worked out when read), the automatic deduction for returns after payout, manual adjustments, payouts, and the admin and agent read functions |
+| `supabase/migrations/20261118120300_commission_hold_versions.sql` | Correction (forward): a commission hold/release names the latest hold event the admin saw, so a stale form can't release a newer hold |
+| `db-tests/referrals.test.ts` | Tests for the three migrations above on real PostgreSQL (provisioning, permissions, checkout, rounding, lifecycle, payouts, races) |
+| `supabase/migrations/20261121120000_score_pricing_and_sales.sql` | Score pricing (groups, scores, manual/automatic, price endings, costs, explicit giveaways), genuine price history and supported "was" prices, sale campaigns (one at a time, previews with tokens, schedule job), and clearance referral exclusion in checkout quotes (see [Score pricing and sales](#score-pricing-and-sales)) |
+| `supabase/setup/schedule_sale_campaigns.sql` | Optional, after the migration: pg_cron job that starts and ends scheduled sales every minute |
+| `db-tests/pricing.test.ts`, `db-tests/sale-schedule-script.test.ts` | Tests for the pricing migration and the schedule script on real PostgreSQL |
 | `supabase/tests/item_codes_sale_prices_test.sql` | Tests for code assignment and collisions, existing codes, the sale price rules, quotes, free delivery, orders and in-store sales at sale prices, and historical orders. Rolls back and puts its counters back |
 | `supabase/tests/label_names_light_up_test.sql` | Tests for the label name and light-up rules, who can read the label name, and that saving them leaves stock, held pairs, inventory versions and the ledger alone. Rolls back |
 | `supabase/tests/orders_test.sql` | Tests for order permissions, the gateway secret, checkout, retries, hold expiry, admin actions, delivery and payment, returns, in-store sales, stale stock edits and ledger reconciliation. Rolls back |
@@ -550,17 +558,38 @@ The server checks these first, for clear messages, and the database enforces the
   the editor opens the stored photo.
 - **Delivery to shoppers:** `/product-photos/<product id>/<image id>.webp` reads the photo
   with the public key and caches it with the catalogue (same `catalogue` tag), and
-  `next/image` optimises it like any other local image.
+  `next/image` optimises it like any other local image. A photo's address never changes
+  what it shows (each upload gets a new image id and never overwrites), so:
+  - Netlify's shared CDN cache keeps the stored photo for at most **4 hours**
+    (`Netlify-CDN-Cache-Control: public, durable, s-maxage=14400`, no stale serving),
+    tagged `product-photos-<product id>`. Netlify's image CDN reads it from there whenever
+    an edge node makes a size it hasn't made yet, instead of running the site's function
+    (measured on 2026-11-17: 1.7–2 s per photo with the old 60-second cache).
+  - Browsers keep each copy for at most **1 hour** (`Cache-Control: public, max-age=3600`).
+  - `next/image` asks for 9 widths instead of 15 (`images` in `next.config.ts`), so
+    shoppers share copies already made more often.
+  - Coming from the catalogue, the product page shows the card's copy of the first photo
+    at once and swaps in the sharper copy when it arrives (`lib/catalog/loaded-photo.ts`).
 - **No signed URLs.** The site never creates or stores Supabase signed URLs. A signed URL
   works for anyone who has it until it expires, and can't be cancelled early: removing an
   admin or unpublishing a product wouldn't stop it. If you ever create one in the
   dashboard, keep the expiry short and don't put it in the database.
-- **After unpublishing:** the photo route stops serving the photo straight away, but copies
-  already made can live a little longer: browsers may keep one for up to 60 seconds, and
-  Next.js keeps its optimised versions for up to 4 hours (`images.minimumCacheTTL`, the
-  default). Only someone who already had the image address could load it; the addresses
-  contain random IDs. On a self-hosted server you can clear the optimised copies at once by
-  deleting `.next/cache/images`.
+- **After unpublishing:** the photo route stops serving the photo straight away, and
+  unpublishing, archiving or removing a photo calls `updateTag` for that product's tag.
+  Netlify's Next.js runtime source passes it to Netlify's purge API, but that hasn't been
+  observed on a host yet (pending owner check). Copies already made can live longer:
+  - The stored photo in Netlify's shared cache: up to 4 hours if the purge doesn't happen.
+  - A browser that showed the photo keeps it for up to 1 hour.
+  - **Resized copies (`/_next/image`) are not bounded by these headers.** Netlify documents
+    that a source image's headers don't control its own image cache, and resized product
+    photos were measured stored for about a year per edge node (2026-11-17). Treat them as
+    kept until the next deploy. Whether the tag purge clears them is **unverified**; check
+    it on the host before relying on it. A deploy clears everything.
+  - Self-hosted, Next.js keeps its resized copies for up to 4 hours
+    (`images.minimumCacheTTL`); delete `.next/cache/images` to clear them at once.
+
+  Only someone who already had the image address could load it; the addresses contain
+  random IDs.
 - **Upload limits:** Server Actions accept up to 4.5 MB per request (`next.config.ts`), which
   also applies to every other action, and matches common hosting limits.
 
@@ -1276,9 +1305,9 @@ each is one transaction, so a failed run changes nothing.
 | Stage | Do | Previous version of the site | This version |
 | --- | --- | --- | --- |
 | 0. Inventory | List every copy of the site that uses this database: hosted deployments (production, previews/branch deploys) and anyone's local `npm run dev`/`npm start`. Note which commit each runs. | | |
-| 1. Expand | Apply `20261117120000_function_default_privileges.sql`, `20261117120100_checkout_quota_quotes_and_phone_limit.sql`, `20261117120200_internal_columns_admin_reads.sql`, `20261117120300_idempotent_photo_registration.sql`, in that order. Run the check query below (expect `stage 1`). | Works (its checkout shows a refusal it doesn't know, "busy", as a general error; checkout is off) | Works |
+| 1. Expand | Apply `20261117120000_function_default_privileges.sql`, `20261117120100_checkout_quota_quotes_and_phone_limit.sql`, `20261117120200_internal_columns_admin_reads.sql`, `20261117120300_idempotent_photo_registration.sql`, in that order. Run the check query below: it must match **Stage 1 complete**. | Works (its checkout shows a refusal it doesn't know, "busy", as a general error; checkout is off) | Works |
 | 2. Switch the site | Short admin pause: ask admins to save their work and close admin tabs. Deploy this version to every copy found in stage 0 (restart local servers on this code); remove or redeploy any preview still on the previous version. Then admins reopen the admin. | Retired | Works |
-| 3. Contract | Only when stage 0's list contains this version alone: apply `20261117120400_restrict_internal_columns.sql`. Run the check query (expect `stage 3`) and the smoke test below. | Admin product list and editor fail (storefront, checkout, scan, labels still work) | Works |
+| 3. Contract | Only when stage 0's list contains this version alone: apply `20261117120400_restrict_internal_columns.sql`. Run the check query (it must match **All hardening complete**) and the smoke test below. | Admin product list and editor fail (storefront, checkout, scan, labels still work) | Works |
 
 Notes on stage 2: admin sign-ins (Supabase sessions) stay valid across the deploy, so
 nobody has to sign in or redo two-step verification. A tab opened before the deploy runs
@@ -1291,20 +1320,71 @@ Supabase CLI users: `supabase db push` would apply all five at once. Apply stage
 SQL Editor and record it with `supabase migration repair --status applied <version>`
 for each, then push (or run `…120400` by hand) at stage 3.
 
-**Check query** (read-only). After stage 1 `stage` is `stage 1`, after stage 3
-`stage 3`; the other columns must always be `false`, `false`, `true`, `true`:
+**Check query** (read-only, safe at any stage; `null` means that function doesn't exist
+yet). The three `*_default_execute` columns read the default EXECUTE privileges on
+functions that `postgres` creates from now on. They look at the global default (when there
+is no global entry, PostgreSQL's built-in default applies, and it includes PUBLIC) plus the
+additions for the `public` and `private` schemas. Each privilege entry is checked by
+grantee, so the owner's own `postgres=X/postgres` doesn't count as PUBLIC. That owner
+privilege is intended (`…120000` keeps it) and is reported as `owner_default_execute`.
 ```sql
+with fn_default as (
+  -- EXECUTE on functions postgres creates from now on: the global default (the
+  -- built-in default when no row exists, which includes PUBLIC) plus the
+  -- additions for the public and private schemas.
+  select x.grantee
+  from (
+    select coalesce(
+      (select d.defaclacl from pg_default_acl d
+       where d.defaclrole = 'postgres'::regrole and d.defaclnamespace = 0 and d.defaclobjtype = 'f'),
+      acldefault('f', 'postgres'::regrole)) as acl
+    union all
+    select d.defaclacl from pg_default_acl d
+    where d.defaclrole = 'postgres'::regrole and d.defaclobjtype = 'f'
+      and d.defaclnamespace in (to_regnamespace('public'), to_regnamespace('private'))
+  ) a, aclexplode(a.acl) x
+  where cardinality(a.acl) > 0 and x.privilege_type = 'EXECUTE'
+)
 select
-  case when has_column_privilege('authenticated', 'public.products', 'label_name', 'SELECT')
-         or has_column_privilege('authenticated', 'public.product_variants', 'reserved', 'SELECT')
-       then 'stage 1' else 'stage 3' end as stage,
-  has_function_privilege('anon', 'public.admin_get_products(uuid[])', 'EXECUTE') as anon_admin_read,
-  exists (select 1 from pg_default_acl d where d.defaclrole = 'postgres'::regrole and d.defaclnamespace = 0
-          and d.defaclobjtype = 'f' and array_to_string(d.defaclacl, ',') like '%=X/%') as public_default_execute,
-  has_function_privilege('authenticated', 'public.admin_get_products(uuid[])', 'EXECUTE') as admins_can_read,
-  has_function_privilege('anon', 'public.place_cod_order(text, text, jsonb)', 'EXECUTE') as checkout_works;
+  case
+    when to_regprocedure('private.lock_phone(text)') is null
+      or to_regprocedure('public.admin_get_products(uuid[])') is null
+      or to_regclass('private.photo_registrations') is null then 'stage 1 incomplete'
+    when has_column_privilege('authenticated', 'public.products', 'label_name', 'SELECT')
+      or has_column_privilege('authenticated', 'public.product_variants', 'reserved', 'SELECT') then 'stage 1'
+    else 'stage 3'
+  end as stage,
+  has_function_privilege('anon', to_regprocedure('public.admin_get_products(uuid[])'), 'EXECUTE') as anon_admin_read,
+  exists (select 1 from fn_default where grantee = 0) as public_default_execute,
+  exists (select 1 from fn_default where grantee in ('anon'::regrole, 'authenticated'::regrole)) as api_default_execute,
+  exists (select 1 from fn_default where grantee = 'postgres'::regrole) as owner_default_execute,
+  has_function_privilege('authenticated', to_regprocedure('public.admin_get_products(uuid[])'), 'EXECUTE') as admins_can_read,
+  has_function_privilege('anon', to_regprocedure('public.place_cod_order(text, text, jsonb)'), 'EXECUTE') as checkout_works;
 ```
-Then run every `supabase/tests/*.sql` file (they roll back) and `npm run db:verify`.
+
+| Result | `stage` | `anon_admin_read` | `public_default_execute` | `api_default_execute` | `owner_default_execute` | `admins_can_read` | `checkout_works` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **Stage 1 complete** (the four expand files) | `stage 1` | `false` | `false` | `false` | `true` | `true` | `true` |
+| **All hardening complete** (after stage 3, `…120400`) | `stage 3` | `false` | `false` | `false` | `true` | `true` | `true` |
+
+- `stage 1 incomplete` means `…120100`, `…120200` or `…120300` is missing. A missing
+  `…120000` shows as `true` in `public_default_execute` and `api_default_execute`.
+- Any other combination is not a state to continue from: stop and find the cause.
+- **Stage 1 complete is not the end of the hardening.** Until stage 3, any signed-in
+  account can still read label names and held stock directly.
+- The hardening is complete only when the query shows the second row, every
+  `supabase/tests/*.sql` file passes (they roll back), `npm run db:verify` passes, and the
+  smoke test below passes.
+
+Checked on 2026-11-21 on throwaway local PostgreSQL only (embedded, with
+`db-tests/supabase-stub.sql`):
+- Before stage 1, `public_default_execute` was `true`.
+- After `…120000`, after stage 1 and after stage 3, the query gave the rows above.
+- With EXECUTE for PUBLIC deliberately restored (global, `public` and `private` defaults)
+  or for `anon`/`authenticated` (`public`), each in a transaction that was rolled back, the
+  query reported it.
+- The previous version of this query matched the owner's own entry, so it showed `true`
+  after a correct `…120000`, and `false` before it.
 **Smoke test** (after stages 2 and 3, as a verified admin): open the product list and a
 product (label name and held stock show), print a label, scan a barcode, upload a photo,
 save and publish.
@@ -1419,7 +1499,7 @@ earlier `admin_save_product`; prefer switching off and fixing forward.
 | `npm test` | Unit tests, including checkout input, keys, Turnstile, configuration, retries and the order flow with fakes | nothing |
 | `npm run test:db` | Every migration and every `supabase/tests/*.sql` file on **real PostgreSQL** (fresh database, and existing data first), plus races with many simultaneous connections (`db-tests/concurrency.test.ts`) | nothing: it starts a throwaway local PostgreSQL server (the `embedded-postgres` package, no Docker); or set `DB_TESTS_URL` (localhost only) and `ALLOW_DB_TESTS=1` |
 | `npx playwright test e2e/checkout.spec.ts` | Checkout while it is off: closed APIs, the order page, admin access | a running build |
-| `npm run test:e2e:checkout` | **The real checkout UI and Server Action through to stored orders and stock** (`e2e/checkout-local.spec.ts`): a successful order and its private page; a double click and two tabs at once; a lost response, then retry and refresh; changed details under the same key; spent and failing bot checks; abandoning a key before and after its order commits | internet access (Turnstile). It starts a throwaway PostgreSQL with every migration, a minimal stand-in for Supabase's HTTP API (`e2e/local-stack/postgrest-shim.mjs`, **not** PostgREST, Auth or Storage), a build in `.next-e2e` and three servers using Cloudflare's Turnstile **testing** keys |
+| `npm run test:e2e:checkout` | **The real checkout UI and Server Action through to stored orders and stock** (`e2e/checkout-local.spec.ts`): a successful order and its private page; a double click and two tabs at once; a lost response, then retry and refresh; changed details under the same key; spent and failing bot checks; abandoning a key before and after its order commits. Also the sales-agent flows (`e2e/referrals-local.spec.ts`) and score pricing and sales (`e2e/pricing-local.spec.ts`). `E2E_SPECS=e2e/pricing-local.spec.ts` runs only the files named | internet access (Turnstile). It starts a throwaway PostgreSQL with every migration, a minimal stand-in for Supabase's HTTP API (`e2e/local-stack/postgrest-shim.mjs`, **not** PostgREST, Auth or Storage), a build in `.next-e2e` and three servers using Cloudflare's Turnstile **testing** keys |
 
 The races cover: 20 buyers for one pre-loved pair (exactly one order); 8 buyers for 5
 pairs; carts with the same sizes in opposite order; an online order against an in-store
@@ -1456,6 +1536,488 @@ job), not real pg_cron.
   - a real Turnstile widget on a real hostname;
   - TCS booking;
   - the host's client-IP header.
+
+## Sales agents
+
+Admins create sales-agent accounts. Each agent has a login, a display name, a username and
+one referral code, plus terms the admin sets: a customer discount and a commission. Anyone may
+share a code: every qualifying order placed with it earns its agent commission, whoever shared
+it. Public sign-up stays disabled; agents only exist because an admin created them.
+
+| Where | What |
+|---|---|
+| `/admin/agents` | List (current terms, earnings by state), and **Add an agent** |
+| `/admin/agents/<id>` | Earnings, **Record a payout**, **Manual adjustment**, referred orders with the terms saved on each, payouts and adjustments, current terms, code on/off, suspend/restore, password links, profile, change log |
+| `/admin/orders/<id>` | The order's referral: code, agent, the terms used, per-line discount and commission, status |
+| `/agent` | The agent's dashboard (phones first): code with **Copy**, discount and rate, earnings by state, release dates, referred orders and payouts (paginated). No customer details |
+| `/agent/login`, `/agent/forgot-password`, `/agent/set-password`, `/agent/auth/confirm` | Sign-in, reset email, choosing a password, one-time links |
+| Checkout | **Referral code (optional)** with Apply/Remove, a discount line, per-line "qualifies / sale item" notes |
+
+### Rules
+
+**Codes** (`lib/agents/code.ts`, `private.normalize_referral_code`): letters A-Z and digits
+0-9, 3 to 16 characters. Case doesn't matter, and spaces and hyphens are ignored (`ah-med`,
+` Ahmed ` and `AHMED` are one code). The creation form suggests the username's letters and digits
+upper-cased (`ahmed` → `AHMED`) and checks availability as you type. A unique constraint decides
+between simultaneous creations. Codes never change (a trigger refuses it) and are never
+released: agents are never deleted, so a deactivated agent's code stays taken. Checking a code
+at checkout says only whether it applies and its discount, never whose it is.
+
+**Terms.** Percentages are stored in basis points (1000 = 10%), from 0 to 50%.
+- The customer discount and the commission are independent.
+- A code can't be enabled until a commission is set **and** the admin has explicitly chosen
+  whether items already on sale qualify (no default).
+- New terms apply to orders placed from then on. Every order keeps a snapshot of the terms it
+  was placed with, which the admin pages show apart from the current terms.
+
+**Money** (all in whole paisa; `20261118120100_referral_checkout.sql`):
+- A line qualifies unless its product is on sale and the terms exclude sale items. A line that
+  doesn't qualify pays its normal (sale) price and earns no commission. The quote says which
+  lines qualify.
+- Discount = discount % of the qualifying lines' total. Commission = commission % of
+  (qualifying total − discount). Delivery never earns commission.
+- **Rounding (the only rule):** each amount is calculated once per order and rounded half up
+  to a whole paisa, then shared across the qualifying lines in proportion to their amounts,
+  leftover paisa going to the largest remainders (earlier lines first on a tie). Line shares
+  always add up exactly.
+- Example: Rs. 5,000 qualifying, 10% → Rs. 500 off; commission 5% of Rs. 4,500 = Rs. 225.
+- **Free delivery** is judged on the merchandise total **after** the discount
+  (Rs. 5,200 with 10% off = Rs. 4,680, below a Rs. 5,000 threshold, so delivery is charged).
+- One code per order. Cart limits, Turnstile, rate limits, the per-phone limit, the global
+  quota and stock locking are unchanged, and nothing limits how often a code is used.
+
+**Checkout.** The database validates the code and works out every amount. The browser sends
+only the code and the discount it showed. A different discount, total, price, delivery fee, a
+disabled code or changed terms returns `quote_changed` with the new quote, never an order. The
+code and that discount are part of the request's identity, so a retry with the same checkout
+key returns the same order and its single commission, while the same key with a different code
+is refused. Orders without a code are normalised exactly as before, so their retries and the
+previous website keep working. Commission never appears in a shopper-facing response.
+
+### Commission lifecycle
+
+States are worked out when read or paid (`private.commission_rows`), never stored, so a
+repeated event, a status retry or a re-run can't move one twice.
+
+| State | When |
+|---|---|
+| Awaiting delivery (estimate) | Placed, confirmed, dispatched, or a failed delivery being retried |
+| Held | Delivered, less than 30 × 24 hours since the **recorded** delivery time. The delivery time can't change once recorded (trigger), so a replay can't restart or shorten the hold |
+| Waiting for courier payment | Hold over, but payment isn't `settled` yet (`pending` or `collected`) |
+| Available | Hold over **and** payment settled: can be paid out |
+| Paid | Included in a payout |
+| No commission | Delivered, but the commission is zero (e.g. a 0% rate). Never offered for payout |
+| On hold (admin) | An admin put this order's commission on hold, e.g. while a return is arranged |
+| Cancelled | Order cancelled: no commission |
+| Reversed | Order returned: the returned lines' commission is reversed, line by line |
+
+The hold ends exactly 720 hours after delivery, on the database's clock. Release times are
+shown in Pakistan time (no daylight saving). The hold length is saved on each order.
+
+**What blocks availability:** the 30-day hold, any payment status other than `settled`, and an
+admin's commission hold. The order model has no "return requested" state. A return is recorded when the parcel is back
+(`delivered` → `returned`), which reverses the commission at once. Returns are whole-parcel
+today, but reversals are worked out per line from the return lines, so partial returns can be
+added later.
+
+**Returns after payout:** the payout stays as it was, and an automatic negative adjustment of
+the paid amount is recorded. Outstanding adjustments count against the next payout.
+
+**Commission holds** (admin order page, `admin_set_commission_hold`): an admin can hold one
+order's commission while a return is being arranged, and release it later.
+- Both need a reason. Every hold and release is kept with who made it and when.
+- A hold changes nothing about the order, its payment or its saved terms.
+- Payouts refuse held commissions, enforced in the database.
+- Releasing removes only that block, so the 30-day hold and settled payment still apply.
+- A hold and a payout of the same order can't both succeed: both lock the order row, so
+  whichever comes second is refused.
+- Each hold or release names the latest hold event the page showed
+  (`20261118120300_commission_hold_versions.sql`). If the hold changed since, for example
+  another tab released it and placed a new one, the change is refused (`hold_conflict`) and
+  the admin reloads. An exact retry of an earlier request returns that request's original
+  result first, without touching the current hold.
+
+### Payouts
+
+Payouts are recorded manually after paying the agent outside the app
+(`admin_record_agent_payout`). In one transaction the database checks:
+- every selected commission is available and unpaid;
+- every outstanding deduction is included;
+- the amount equals the selection's total and is more than zero;
+- the date isn't in the future.
+
+A request id makes retries safe; the same id with different details is refused. Each
+commission and adjustment can be paid only once (unique constraints). A payout locks the agent,
+then the orders, so a return and a payout of the same order happen one after the other. Payouts,
+their lines, adjustments, referral snapshots and the agent change log are append-only.
+
+Manual adjustments need a reason (5-300 characters) and record who made them and when.
+
+**Retries of admin changes.** Every admin form sends a request id.
+- The database keeps each request's identity: its action and full, normalised payload, plus
+  the agent version the admin saw.
+- The same id with the same identity is a replay. It isn't applied again, and it reports the
+  agent version **that** change produced, never a newer one made by someone else. A stale
+  form is therefore still refused as a conflict.
+- The same id with anything else is refused (`request_mismatch`).
+- Each form captures its complete request (id, target, action, expected version and every
+  field) when it is first sent.
+  - **No answer:** the form keeps that request and its button becomes **Retry unconfirmed
+    save**, which resends exactly the same request, whatever has been typed since. Other
+    forms on the page wait until it's resolved.
+  - **Definitive answer** (applied, recognised as earlier, or refused): the form takes a new
+    id, so rejected input can be corrected and sent as a new request.
+  - **Blocked** (signed out, no admin access or two-step verification, sign-in or the database
+    unreachable, a lock busy): the request wasn't checked, so nothing is resolved. An
+    unconfirmed request keeps its id and stays unconfirmed, and other forms keep waiting
+    (`lib/admin/request-outcome.ts`).
+  - An unconfirmed request is also kept in the tab's session storage until it has a
+    definitive answer. An expired session sends the tab to sign-in; after signing in (in that
+    tab or another), open the same page again and the form offers **Retry unconfirmed save**
+    for the original request. A reload keeps it too. Closing the tab loses it: check the page
+    or the agent's change log before re-entering anything.
+- Two copies of an agent-creation request are serialised before anything is read, so they
+  return the same agent. Different requests for one email or code still conflict.
+
+### Accounts and security
+
+- **Agent sessions** use their own cookie (`kns-agent-auth`, path `/agent`, HttpOnly). An agent
+  login is never sent to `/admin` or the shop, and an admin's never to `/agent`. `proxy.ts`
+  refreshes it and marks every `/agent` response `no-store`, as for `/admin`.
+- **Access** needs a verified identity (`getUser()`) and an **active** agent membership,
+  checked on every page (`lib/auth/agent.ts`) and again in every `agent_*` function. Suspended
+  agents and other logins see nothing. Agents can't call any `admin_*` function, can't read any
+  table directly, and can't grant themselves anything: no API role has privileges on the agent
+  or accounting tables. Admins keep their membership + aal2 requirement, and admins can't also
+  be agents.
+- **Creating an agent** happens on the server, after the admin's identity, membership and aal2
+  are verified. Steps (`lib/agents/provision.ts`), each safe to repeat:
+  1. Save the agent.
+  2. Create the login with Auth's admin API, which needs `SUPABASE_SECRET_KEY` (server only,
+     never `NEXT_PUBLIC_`). Only the Auth admin API is used with it.
+  3. Link the login (refused for admins and for logins already used by another agent).
+  4. Make a one-time password link for the admin to send.
+
+  If anything fails part-way, **Finish set-up and create password link** on the agent's page
+  completes it. Auth refuses a second user with the same email, so there are no duplicates.
+- **Password links** open `/agent/auth/confirm`, which verifies them on the server and asks for
+  a password (at least 10 characters). They work once and expire (Auth → Email link expiry).
+  They aren't stored, and the change log notes that one was made.
+- **Forgot password** emails a reset link through Supabase Auth. It only reaches agents once
+  the project has custom SMTP (Supabase's built-in mail sends only to team members). Until then,
+  admins create a link from the agent's page.
+
+### Setup and rollout (owner)
+
+Nothing here is applied yet. The previous version of the site works with or without these
+migrations. **This version needs them.** From the code (not measured):
+- the admin order page reads the order's referral (`admin_order_referral`), so it doesn't
+  load without them;
+- checkout quotes call `quote_order` with a referral-code argument;
+- `/admin/agents` and `/agent` need the agent functions.
+
+The product pages, scan and labels don't depend on them.
+
+1. **Finish the 2026-11-17 hardening rollout first: all of stage D, through stage 3
+   (`…120400`).** Stage D's check query must show **All hardening complete**; Stage 1
+   complete is not enough. Checked on throwaway local PostgreSQL (2026-11-21), comparing
+   functions, privileges, columns, policies and triggers with applying every file in
+   filename order:
+   - **`…120100` is required.** `20261118120100_referral_checkout.sql` replaces
+     `place_cod_order` with a version that calls `private.lock_phone` and
+     `private.take_quota_slot`. Applied before stage 1, the agent migrations still
+     succeed, but checkout then fails. Applying `…120100` afterwards silently puts back a
+     `place_cod_order` that records no referrals. Never apply these before stage 1.
+   - **`…120400` is not a database dependency.** Stage 1, then these four files, then
+     `…120400` gave the same result as filename order. It still comes first, for two
+     reasons. Agents are signed-in accounts, and until `…120400` any signed-in account can
+     read label names and held stock directly. And the Supabase CLI expects migrations in
+     filename order.
+   - **The gap in between.** While the database has the hardening but not these
+     migrations, a copy running this version has the admin order page, checkout quotes and
+     the agent pages failing (see above). Applying these four before `…120400` would close
+     that gap, and its database result is the same. That is an owner decision, not the
+     default. If you take it, create no agent until `…120400` is applied.
+2. **Apply, in order:** `20261118120000_sales_agents.sql`, `…120100_referral_checkout.sql`,
+   `…120200_commission_accounting.sql`, `…120300_commission_hold_versions.sql`. The
+   deployed site keeps working:
+   - `quote_order` still accepts three arguments;
+   - `place_cod_order` takes the same input;
+   - orders without a code behave as before.
+
+   To check, run read-only in the SQL Editor:
+
+   ```sql
+   select to_regclass('public.sales_agents') is not null as agents,
+          to_regprocedure('public.quote_order(text, jsonb, text, text)') is not null as quote_with_code,
+          to_regclass('public.agent_payouts') is not null as payouts;
+   ```
+3. **Website settings** (server-only):
+   - `SUPABASE_SECRET_KEY`: Project Settings → API Keys → Secret keys.
+   - `AGENT_LINK_ORIGIN`: the site's public address, e.g. `https://kharchnsave.pk`.
+4. **Supabase Auth settings:**
+   - keep **Allow new users to sign up** off;
+   - add `<AGENT_LINK_ORIGIN>/agent/auth/confirm` to **Redirect URLs** (for reset emails);
+   - choose the **Email link expiry**;
+   - optionally set up custom SMTP.
+5. **Deploy this version**, then create a test agent with your own second email. Open the
+   link, set a password, place a test order with the code, and check `/agent` and the admin
+   pages.
+
+**Recovery.** Prefer these before rolling anything back:
+- **Stop accepting the code** (per agent) to stop new referral orders at once. Orders already
+  placed keep their discount, and their commission continues normally.
+- **Suspend** an agent to lock them out. Their earnings are kept.
+
+Rolling the website back to the previous version is safe at any time. Totals stay correct;
+only the discount and referral details aren't shown. Never delete or edit agents, referral
+snapshots, payouts or adjustments by hand: corrections are adjustments, with a reason. Fix
+database problems with a new forward migration.
+
+### Verification status
+
+**Measured (local).** All on this machine; commands and results are in the delivery notes.
+- `db-tests/referrals.test.ts` (54 tests) runs on real PostgreSQL. It covers:
+  - provisioning, its recovery and permissions;
+  - code rules and racing creations;
+  - retired codes and isolation;
+  - checkout with and without codes, mixed carts and rounding;
+  - free delivery, tampering and terms changes;
+  - retries and concurrency;
+  - the hold boundary, settlement, cancellations and returns;
+  - payouts, including concurrent ones and the race with a return;
+  - zero commissions beside positive ones;
+  - commission holds, including a hold racing a payout and stale hold/release forms;
+  - edit retries, and the creation interleaving that returned `email_exists`;
+  - history.
+- `e2e/referrals-local.spec.ts` runs the real pages against the local stand-in. It covers:
+  - an admin creating an agent;
+  - the agent setting a password, signing in and seeing only their own figures;
+  - a shopper applying and removing codes and ordering;
+  - hold, settlement and a payout;
+  - a return after payout and a cancellation;
+  - repeated admin edits without reloading, a lost answer retried, code off/on, suspend/restore;
+  - unconfirmed saves: the original request is resent after edits, other forms wait, another
+    admin's change isn't adopted, and refused input can be corrected; a payout retried after a
+    lost answer is recorded once;
+  - the commission-hold form on the admin order page in two tabs: a stale release is refused;
+  - an adjustment and a payout whose answers were lost, retried with an expired session, then
+    after signing in again: same request id throughout, one adjustment, one payout.
+
+**Needs a real Supabase project (not verified).**
+- Auth's `generateLink` and `verifyOtp` responses.
+- Email link expiry.
+- The reset email and its redirect allow-list.
+- Secure cookies over HTTPS on the host.
+- That the migration role can read `auth.users` from `admin_link_agent_user`. Supabase
+  normally allows this. Check it once with an agent on `kharchnsave-dev` before production.
+
+**Decisions for the owner:**
+- Can an agent use their own code? It's allowed today.
+- Should codes have expiry dates or usage caps? There are none.
+- Should the hold length be a setting? It's fixed at 30 days.
+- Should payouts use a method other than manual recording?
+
+## Score pricing and sales
+
+Admins rank pairs from 0 to 100 instead of pricing each by hand, and run sales from
+**Admin → Pricing** and **Admin → Sales** (phones first). Everything is in
+`supabase/migrations/20261121120000_score_pricing_and_sales.sql`; the arithmetic is mirrored
+for instant estimates in `lib/pricing/rules.ts`.
+
+**One pricing path.** `products.price_paisa` (regular) and `products.sale_price_paisa` (what
+customers pay while set) stay the only prices that checkout, quotes, order snapshots, referral
+discounts and commission read. Scores, groups and campaigns only **write** those two columns,
+through admin functions, after a preview the admin confirmed, in one transaction. Nothing in
+checkout trusts a price, score, discount or campaign sent by the browser.
+
+### Rules
+
+| Rule | How |
+| --- | --- |
+| Calculated price | `floor(group maximum × score / 100)` in paisa (integers only) |
+| Price ending (default 95, setting 0-99) | The highest positive whole-rupee price ending in 95 that doesn't exceed the calculated amount; a price already ending in 95 keeps it; never above the maximum. Rs. 1,500 → 1,495; 2,000 → 1,995; 2,500 → 2,495; 5,000 → 4,995. Nothing possible (e.g. Rs. 90): "too small", flagged, nothing written |
+| Score 0 | "Needs pricing" (nothing written), unless the admin explicitly makes it a giveaway (a confirm dialog; recorded as `giveaway_set`). A published product still can't cost 0 otherwise: `products_published_price_positive` now allows 0 only with `zero_price_approved`, which only the pricing functions set |
+| Manual / automatic | Every existing product stays **manual** with its price; no score or cost is invented. Automatic products follow their group; manual ones are never repriced |
+| Groups | Each has its own maximum (Rs. 100 to Rs. 10,00,000, whole rupees). Several groups can be adjusted together (or by a %) in one preview |
+| Sale price | The same ending rule after `floor(regular × (100% − discount))`; the extra discount the ending adds is shown per line and in total |
+| Costs and margins | Cost per item is optional; missing is **unknown**, never 0. Optional minimum profit (Rs.) and minimum margin (kept ÷ what the customer pays), checked against the **worst current** referral scenario of every enabled code (agents' terms differ) |
+| History | Every change of a product's regular, sale or reference price or publication is written to `private.price_history` (append-only) with the reason, request and admin. History starts at the migration ("observed_at_migration"); nothing earlier is assumed |
+
+The score is the pair's relative value. Discounts are separate (campaigns): a slower-selling pair
+can get a larger discount without its score changing.
+
+### Honest discounts
+
+A crossed-out "was" price and a % badge appear only with a **supported reference price**:
+`products.reference_price_paisa`, set by the database (never by a caller) when a sale starts,
+and only if the price history shows the product was offered at that regular price, published
+and not on sale, for at least `reference_min_days` if the owner set one. **No minimum is
+assumed** (no legal duration is invented); set one if your own advice calls for it. Its
+provenance (price, since when, until when) is in `private.product_reference_prices`.
+
+- New or imported listings, drafts, prices raised just before a sale, and sales set before this
+  migration have **no** reference: the shop shows the selling price only, no badge, and the
+  admin coverage report lists them with the reason.
+- `savings = reference − final price`; `percent = floor(100 × savings / reference)`. The final
+  price is shown first; the was-price, % and rupee saving next to it (`components/product/product-price.tsx`).
+- While a sale continues the reference can only go **down**: a new group maximum never raises a
+  was-price or manufactures a bigger discount (lowering the regular price lowers the reference
+  with it; a reference no longer above the sale price is dropped). The repricing preview shows
+  each running sale's badge before → after.
+- A checkout quote line carries `reference_price_paisa` (null without one) for the same display.
+
+### Sales
+
+- **Lifecycle:** draft → scheduled (start in the future) or running → ended; or cancelled.
+  Activation, ending, cancelling and unscheduling are explicit buttons (with confirmations).
+- **One sale at a time.** Activating a sale whose window overlaps another scheduled or running
+  sale is refused (`campaign_overlap`, naming it): end, cancel or reschedule one. A product
+  already on another sale (or with a manual sale price) is left out ("other_sale"), never stacked.
+- **Selection** is explicit and stable: each product is on sale, kept at the regular price (with
+  an optional note), or not chosen; bulk buttons pick all eligible pre-loved, all eligible new or a
+  group. Nothing rotates, and nothing is reclassified as slow-selling by age. Changes to a running
+  sale's selection are previewed and applied the same way.
+- **Preview and apply:** the preview lists every product's regular and sale price, the actual
+  discount after the price ending, the was-price shoppers will see (or why none), the referral
+  scenarios, commission, what's kept after the recorded cost, and why any product is left out
+  (unpublished, too small, no supported reference when the sale requires one, unknown cost or
+  below the margin minimum without an explicit, recorded exception). Applying sends the preview's
+  token: if anything changed since (a price, a product, an agent's terms), nothing is applied
+  and the new preview comes back.
+- **Scheduled start:** at the start, the reviewed sale price is applied only to products whose
+  regular price is still the reviewed one; others are left out as "changed since review".
+- **Presets** (editable starting points, not researched optimums): New shoes 10–15%, Recently
+  listed pre-loved 10%, Slower-selling pre-loved 15–20%, Clearance 25–30%.
+- **Coverage** (Sales page) counts published, in-stock **listings** (products, not sizes or
+  pairs): eligible, on sale, actual %, the target (`ceil(85% × eligible)` for new, 100% for
+  pre-loved; settings) and the gap; newly published listings not yet in or out of the sale
+  ("needs review"); products kept at the regular price; left out with reasons; and on sale
+  without a was-price.
+
+**Starts and ends** run from `private.run_sale_schedule()`: every minute by pg_cron after
+`supabase/setup/schedule_sale_campaigns.sql`, or when an admin presses **Run due starts and
+ends now** (Sales). Without pg_cron, sales start and end only from that button, and the Sales
+page shows overdue ones. Timing: up to a minute after the set time with pg_cron. Checkout
+always charges the database's current price and catches a change between quote and order
+(`quote_changed`). The shop's cached catalogue is refreshed by every pricing and sale admin
+action (`updateTag`, as for product saves) and otherwise within its cache profile (about a
+minute) after a scheduled start or end. **Measured locally** (`next start`,
+`e2e/pricing-local.spec.ts`): after an admin action, the first product-page request was still
+served from the previous catalogue and the second showed the new prices. The same applies to
+existing product saves. On the host this depends on its cache/CDN (not verified).
+
+### Agents and profit
+
+The referral rules are unchanged (`private.checkout_quote`, `private.record_order_referral`):
+sale discount first, then the code's discount on the qualifying sale amount, then commission on
+qualifying goods after the customer's discount; delivery earns none. A 20% sale then a 10% code
+is 28% off, not 30%. Discount and commission are still worked out once per order and shared
+across lines. A line qualifies unless its product is on sale and the agent's terms exclude sale
+items, **or** its sale explicitly excludes referral discounts (a clearance option, shown on the
+product page and at checkout as "Clearance item: referral codes don't apply"; agents earn
+nothing on those lines). The Sales page warns when enabled agents' terms exclude sale items while
+pre-loved listings are on sale; to let them earn on ordinary sale products, set "Discount on items
+already on sale? Yes" on the agent's page (new orders only; existing orders keep their snapshot).
+
+### Access and data
+
+Costs, scores, groups, margins, history and campaigns live in the `private` schema (no API role
+can read it) and are returned only by `admin_*` functions, which require a verified admin
+(member + aal2) before reading their input; agents, signed-in non-admins, aal1 admins and
+visitors get 42501. Visitors see only `reference_price_paisa` and `referral_excluded` (granted
+to anon and authenticated alike). Every write function is `SECURITY DEFINER` with
+`search_path = ''`, explicitly granted to `authenticated` only, versioned (stale forms:
+`version_conflict`) and keyed by the form's request id (a retry returns the original answer; the
+same id with other data: `request_mismatch`). The product form can't change an automatic
+product's price (`auto_priced`) or a running sale's prices (`campaign_price`): its price fields
+are read-only there, and the database refuses it anyway.
+
+### Setup and rollout (owner)
+
+Nothing here is applied to a hosted project yet.
+
+1. **Before:** every earlier migration, through `20261118120300_commission_hold_versions.sql`
+   (the 2026-11-17 hardening through stage 3, then the sales-agent migrations). This one replaces
+   `private.checkout_quote` as the referral migration left it and reads `public.sales_agents`.
+   Check, read-only:
+   ```sql
+   select to_regprocedure('public.quote_order(text, jsonb, text, text)') is not null as referrals,
+          to_regclass('public.order_referrals') is not null as referral_snapshots,
+          to_regprocedure('public.admin_get_products(uuid[])') is not null as hardening,
+          not has_column_privilege('authenticated', 'public.products', 'label_name', 'SELECT') as hardening_stage_3;
+   ```
+   All four must be `true`.
+2. **Apply** `20261121120000_score_pricing_and_sales.sql` in the SQL Editor (one transaction).
+3. **Deploy this version** of the site to every copy that uses the database, **before activating
+   any sale or setting any sale price**. See the compatibility limits below.
+4. **Optional:** enable pg_cron and run `supabase/setup/schedule_sale_campaigns.sql`.
+5. In **Pricing**, create groups, then score products in bulk (preview, confirm). Set costs where
+   known. In **Sales**, create a sale, choose products, preview, confirm.
+
+**Compatibility limits.**
+
+| Code | Database | What happens |
+| --- | --- | --- |
+| This version | **without** this migration | The shop and product pages fail to load (they read `reference_price_paisa`); Pricing and Sales fail. Apply the migration first |
+| Previous version | **with** it | Works (checkout, agents, orders unchanged; quote lines have two extra fields it ignores). But its shop shows any sale price with the regular price crossed out, whether supported or not, so don't start sales until this version is deployed. Its product form's save is refused for automatic or running-sale prices (shown as a general error) |
+| This version | with it | Everything works |
+
+**Verification queries** (read-only; run after step 2):
+```sql
+select
+  to_regprocedure('public.admin_apply_campaign(uuid, integer, uuid, text)') is not null as installed,
+  has_function_privilege('anon', 'public.admin_pricing_overview()', 'EXECUTE') as anon_can_call_admin,      -- false
+  has_function_privilege('authenticated', 'public.admin_pricing_overview()', 'EXECUTE') as signed_in_can_call, -- true (the function itself requires a verified admin)
+  has_column_privilege('anon', 'public.products', 'reference_price_paisa', 'SELECT') as anon_reads_reference, -- true
+  has_column_privilege('anon', 'public.products', 'zero_price_approved', 'SELECT') as anon_reads_giveaway_flag, -- false
+  has_table_privilege('authenticated', 'private.product_pricing', 'SELECT') as signed_in_reads_costs,      -- false
+  (select count(*) from private.product_pricing) as products_opted_in,                                     -- 0 right after the migration
+  (select count(*) from private.price_history where reason = 'observed_at_migration') = (select count(*) from public.products) as history_started;
+```
+Then run every `supabase/tests/*.sql` file (they roll back) and `npm run db:verify`. On dev,
+smoke-test as a verified admin: score one product (preview → confirm), change its group's
+maximum, run a one-product sale (preview → start now → product page shows the was-price only if
+supported → end), and check a referral order at checkout keeps its snapshot.
+
+**Recovery** (no rewriting of orders, referral snapshots, commissions or history):
+- Stop a sale: **End the sale now** (prices go back to regular at once). Cancel or unschedule
+  scheduled ones. Stop the job: `select cron.unschedule(jobid) from cron.job where jobname = 'kharchnsave-sale-schedule';`
+- Stop automatic pricing for products: switch them to **Manual** in Pricing (their current price
+  stays). A wrong repricing is fixed forward: change the maximum back, preview, confirm.
+- Orders placed during a sale keep their prices, discounts and commission. Never edit
+  `private.price_history`, `private.pricing_events` or order tables by hand; fix problems with a
+  new forward migration.
+
+### Verification status
+
+**Measured (local, this machine):**
+- `db-tests/pricing.test.ts` (29 tests) on real PostgreSQL with every migration: the rules agree with
+  `lib/pricing/rules.ts` on a grid; every admin function refuses anon, signed-in users (aal1/aal2),
+  aal1 admins and agents; private tables are unreadable; score pricing, needs-pricing, too-small,
+  explicit giveaways; the product form can't change automatic prices; stale previews, replays,
+  request mismatches and 6 identical requests at once; maximum and ending changes; supported and
+  unsupported references (new listing, draft, minimum days); campaigns (start, end, overlap, two
+  activations at once, schedule start/end, changed-since-review, cancel/unschedule, duplicate
+  activation); a maximum change during a sale (badge stays 20%, not 36%); margins with unknown
+  costs, violations, overrides and the worst of three agents' terms; checkout (28% combined,
+  commission basis, snapshot unchanged after the sale ends, quote_changed, clearance exclusion);
+  coverage by listing (`ceil(85%)`, sold out and drafts excluded, needs review).
+- `db-tests/sale-schedule-script.test.ts`: the pg_cron script against a stand-in (repeat-safe, one job).
+- `lib/pricing/rules.test.ts`, `lib/catalog/pricing.test.ts`: endings, scores, sales, badges, coverage, scenarios.
+- `e2e/pricing-local.spec.ts` (phone viewport) on the local stack: bulk scoring with preview, a lost answer
+  retried once, a new maximum, a sale created/selected/started/ended, the product page showing the
+  supported was-price and saving (and no badge without history), the product form's price locked.
+
+**Needs a real Supabase project or the host (not verified):** PostgREST serving the new
+functions and columns; pg_cron running `schedule_sale_campaigns.sql`; the hosted cache/CDN
+refresh after scheduled starts and ends.
+
+**Assumptions and limits (v1):** one active sale at a time; pricing groups are an explicit
+assignment (no category system); the giveaway needs automatic pricing with score 0; group names
+can't be renamed or groups deleted yet; margin checks use per-unit estimates (an order's
+discount and commission are rounded once per order and can differ by a paisa); scheduled times
+are entered in Pakistan time (UTC+5).
 
 ## Enabling online payments
 

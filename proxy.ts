@@ -1,23 +1,33 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-import { ADMIN_LOGIN } from "@/lib/auth/safe-redirect";
-import { getSupabaseConfig, SESSION_COOKIE_OPTIONS, sessionFetch } from "@/lib/supabase/config";
+import { ADMIN_LOGIN, AGENT_LOGIN, AGENT_PUBLIC } from "@/lib/auth/safe-redirect";
+import {
+  AGENT_AUTH_COOKIE,
+  AGENT_SESSION_COOKIE_OPTIONS,
+  getSupabaseConfig,
+  SESSION_COOKIE_OPTIONS,
+  sessionFetch,
+} from "@/lib/supabase/config";
 
 /*
- * Runs before /admin routes only (see `matcher`), so storefront pages stay
- * cookie-free and cacheable.
+ * Runs before /admin and /agent routes only (see `matcher`), so storefront
+ * pages stay cookie-free and cacheable. Each area has its own session cookie
+ * (name and path), so the two never see each other's login.
  *
- * 1. Visitors with no Supabase session cookie are sent to the login page.
- *    This is an optimistic shortcut; it decides nothing. Every admin page and
- *    action verifies the user and their membership on the server.
+ * 1. Visitors with no session cookie for the area are sent to its sign-in
+ *    page (except the area's public pages: sign-in, password links). This is
+ *    an optimistic shortcut; it decides nothing. Every page and action
+ *    verifies the user and their membership on the server.
  * 2. Otherwise it refreshes an expiring session and writes the new auth
  *    cookies, which Server Components can't do themselves.
- * 3. Every admin response is marked uncacheable, so no shared cache can store
- *    a session cookie or signed-in content.
+ * 3. Every response is marked uncacheable, so no shared cache can store a
+ *    session cookie or signed-in content.
  */
 
-const AUTH_COOKIE = /^sb-.+-auth-token(\.\d+)?$/;
+const ADMIN_AUTH_COOKIE = /^sb-.+-auth-token(\.\d+)?$/;
 const NO_STORE = "private, no-cache, no-store, must-revalidate, max-age=0";
+
+const isUnder = (path: string, base: string) => path === base || path.startsWith(`${base}/`);
 
 function noStore(response: NextResponse) {
   response.headers.set("Cache-Control", NO_STORE);
@@ -28,22 +38,27 @@ function noStore(response: NextResponse) {
 
 export async function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
-  const isLogin = pathname === ADMIN_LOGIN || pathname.startsWith(`${ADMIN_LOGIN}/`);
-  const hasSessionCookie = request.cookies.getAll().some((cookie) => AUTH_COOKIE.test(cookie.name));
+  const agentArea = isUnder(pathname, "/agent");
+  const area = agentArea
+    ? { login: AGENT_LOGIN, home: "/agent", cookie: AGENT_AUTH_COOKIE, options: AGENT_SESSION_COOKIE_OPTIONS, public: AGENT_PUBLIC }
+    : { login: ADMIN_LOGIN, home: "/admin", cookie: ADMIN_AUTH_COOKIE, options: SESSION_COOKIE_OPTIONS, public: [ADMIN_LOGIN] };
+  const isPublic = area.public.some((path) => isUnder(pathname, path));
+  const hasSessionCookie = request.cookies.getAll().some((cookie) => area.cookie.test(cookie.name));
 
-  if (!isLogin && !hasSessionCookie) {
+  if (!isPublic && !hasSessionCookie) {
     const login = request.nextUrl.clone();
-    login.pathname = ADMIN_LOGIN;
+    login.pathname = area.login;
     login.search = "";
-    if (pathname !== "/admin") login.searchParams.set("next", `${pathname}${search}`);
+    if (pathname !== area.home) login.searchParams.set("next", `${pathname}${search}`);
     return noStore(NextResponse.redirect(login));
   }
 
   let response = NextResponse.next({ request });
+  if (!hasSessionCookie) return noStore(response);
   try {
     const { url, key } = getSupabaseConfig();
     const supabase = createServerClient(url, key, {
-      cookieOptions: SESSION_COOKIE_OPTIONS,
+      cookieOptions: area.options,
       cookies: {
         getAll() {
           return request.cookies.getAll();
@@ -69,5 +84,5 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/admin/:path*"],
+  matcher: ["/admin/:path*", "/agent/:path*"],
 };

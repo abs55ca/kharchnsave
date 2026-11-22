@@ -1,18 +1,21 @@
 // Local checkout test stack: the real checkout UI and Server Action, end to
-// end, against a real PostgreSQL database with every migration applied.
+// end, against a real PostgreSQL database with every migration applied; and
+// the sales-agent flows (admin, agent and shopper) on the same stack.
 //
 //   node scripts/e2e-checkout-local.mjs
 //
 // What runs, all on this machine and all removed afterwards:
 //   * a throwaway PostgreSQL server (embedded-postgres; no Docker)
 //   * e2e/local-stack/postgrest-shim.mjs, a minimal stand-in for Supabase's
-//     HTTP API (NOT PostgREST, NOT Supabase Auth or Storage)
+//     HTTP API and a few Auth endpoints (NOT PostgREST, NOT Supabase Auth or
+//     Storage); sessions are signed with a throwaway secret made here
 //   * a production build of the site in .next-e2e, pointed at the stand-in
 //   * three servers of that build, using Cloudflare's published Turnstile
 //     testing keys (https://developers.cloudflare.com/turnstile/troubleshooting/testing/):
 //     one whose secret always passes, one "already spent", one always failing.
 //     Only this local configuration sets CHECKOUT_TURNSTILE_TESTING_KEYS=allow.
-//   * e2e/checkout-local.spec.ts in Playwright
+//   * e2e/checkout-local.spec.ts, e2e/referrals-local.spec.ts and e2e/pricing-local.spec.ts
+//     in Playwright (E2E_SPECS=a,b runs only those files)
 //
 // It never reads .env.local's Supabase project: the build and servers get
 // their own settings, which take precedence. Needs internet access for the
@@ -99,6 +102,10 @@ try {
   await admin.end();
 
   const gatewaySecret = randomBytes(32).toString("base64url");
+  // TEST VALUES ONLY: the stand-in's session-signing secret and "secret key".
+  const authSecret = randomBytes(32).toString("base64url");
+  const serviceKey = `sb_secret_local_e2e_only_${randomBytes(16).toString("hex")}`;
+  const adminId = "a0a0a0a0-0000-4000-8000-0000000e2e00";
   const owner = new pg.Client(connection);
   await owner.connect();
   owner.on("notice", () => {});
@@ -117,10 +124,12 @@ try {
     update public.shop_settings set delivery_area_mode = 'nationwide', free_delivery_enabled = true,
       free_delivery_min_paisa = 500000, max_lines_per_order = 10, max_units_per_order = 10, max_units_per_line = 4,
       max_open_orders_per_phone = 20, place_attempts_per_ip_10min = 1000, place_attempts_per_ip_day = 10000,
-      lookups_per_ip_10min = 1000, quotes_per_ip_10min = 10000, orders_per_minute_global = 1000, orders_open = true;`);
+      lookups_per_ip_10min = 1000, quotes_per_ip_10min = 10000, orders_per_minute_global = 1000, orders_open = true;
+    insert into auth.users (id, email) values ('${adminId}', 'e2e-admin@test.invalid');
+    insert into public.admin_members (user_id) values ('${adminId}');`);
   await owner.end();
 
-  shim = await startShim({ connection, port: await freePort() });
+  shim = await startShim({ connection, port: await freePort(), authSecret, serviceKey });
   const common = {
     NEXT_DIST_DIR: DIST,
     NEXT_PUBLIC_SUPABASE_URL: shim.url,
@@ -142,16 +151,21 @@ try {
       TURNSTILE_SECRET_KEY: SECRETS[name],
       CHECKOUT_TURNSTILE_TESTING_KEYS: "allow",
       CLIENT_IP_SOURCE: "none",
+      SUPABASE_SECRET_KEY: serviceKey,
+      AGENT_LINK_ORIGIN: `http://127.0.0.1:${port}`,
     }));
   }
   for (const port of Object.values(ports)) await waitFor(`http://127.0.0.1:${port}/order`);
 
-  await run(process.execPath, ["node_modules/@playwright/test/cli.js", "test", "e2e/checkout-local.spec.ts"], {
+  await run(process.execPath, ["node_modules/@playwright/test/cli.js", "test", ...(process.env.E2E_SPECS ? process.env.E2E_SPECS.split(",") : ["e2e/checkout-local.spec.ts", "e2e/referrals-local.spec.ts", "e2e/pricing-local.spec.ts"])], {
     E2E_LOCAL_STACK: "1",
     E2E_BASE_URL: `http://127.0.0.1:${ports.pass}`,
     E2E_BASE_URL_SPENT: `http://127.0.0.1:${ports.spent}`,
     E2E_BASE_URL_FAIL: `http://127.0.0.1:${ports.fail}`,
     E2E_DB_URL: `postgres://postgres:${encodeURIComponent(password)}@127.0.0.1:${dbPort}/kns_e2e`,
+    E2E_AUTH_SECRET: authSecret,
+    E2E_ADMIN_ID: adminId,
+    E2E_GATEWAY_SECRET: gatewaySecret,
   }, "playwright");
   exitCode = 0;
 } catch (error) {

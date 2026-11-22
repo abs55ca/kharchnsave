@@ -3,7 +3,7 @@ import { cacheLife, cacheTag } from "next/cache";
 import { getSupabase } from "@/lib/supabase/server";
 import { CONDITIONS, DEPARTMENT_ORDER, STYLE_LABELS } from "./labels";
 import { lightUpFromColumns } from "./light-up";
-import { pricesFromColumns } from "./pricing";
+import { shopPrices } from "./pricing";
 import { productPhotoSrc } from "./photos";
 import type { Condition, Department, ItemStatus, Product, Style } from "./types";
 
@@ -35,7 +35,7 @@ export class CatalogueUnavailableError extends Error {
 // can't read it (20261101120000_label_names_and_light_up.sql).
 const PRODUCT_COLUMNS = `
   id, item_code, slug, name, brand, department, styles, item_status, condition,
-  condition_notes, colour, description, price_paisa, sale_price_paisa, listed_at,
+  condition_notes, colour, description, price_paisa, sale_price_paisa, reference_price_paisa, referral_excluded, listed_at,
   light_up, light_up_condition, light_up_activation,
   product_variants (sku, size_eu, stock),
   product_images (src, storage_path, alt, width, height, sort_order, focus, shows_defect)
@@ -56,6 +56,8 @@ type ProductRow = {
   description: string;
   price_paisa: number;
   sale_price_paisa: number | null;
+  reference_price_paisa: number | null;
+  referral_excluded: boolean | null;
   listed_at: string | null;
   light_up: boolean | null;
   light_up_condition: string | null;
@@ -103,8 +105,8 @@ function toProduct(row: ProductRow): Product {
     condition: oneOf<Condition>(row.condition, CONDITION_VALUES, "condition", row.slug),
     conditionNotes: row.condition_notes,
     colour: row.colour,
-    // Paisa become rupees only here: what a shopper pays now, and the regular price while on sale.
-    ...pricesFromColumns(row),
+    // Paisa become rupees only here: what a shopper pays now, and the supported "was" price while on sale.
+    ...shopPrices(row),
     description: row.description,
     lightUp,
     images: [...row.product_images]

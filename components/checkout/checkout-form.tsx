@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { placeOrder } from "@/app/checkout/actions";
+import { CODE_INPUT_MAX, formatPercent, normalizeReferralCode } from "@/lib/agents/code";
 import { cartStore } from "@/lib/cart/cart-store";
 import { fullName } from "@/lib/catalog/product-utils";
 import {
@@ -105,6 +106,9 @@ function CheckoutFlow({ siteKey }: { siteKey: string }) {
   const [turnstileDown, setTurnstileDown] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  // The referral code as typed, and the one applied to the quote (normalised).
+  const [codeInput, setCodeInput] = useState("");
+  const [appliedCode, setAppliedCode] = useState<string | null>(null);
 
   // A key never sent is simply replaced when the cart changes.
   if (attempt.state === "draft" && attempt.cart !== digest) setAttempt(attemptForCart(attempt, digest));
@@ -163,7 +167,7 @@ function CheckoutFlow({ siteKey }: { siteKey: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt.key, attempt.state, mustAbandon, settleRun, checking]);
 
-  // Live quote: prices, stock and delivery, re-checked when the cart or city changes.
+  // Live quote: prices, stock, discount and delivery, re-checked when the cart, city or code changes.
   const linesJson = JSON.stringify(orderLines);
   useEffect(() => {
     let cancelled = false;
@@ -171,7 +175,7 @@ function CheckoutFlow({ siteKey }: { siteKey: string }) {
       fetch("/api/checkout/quote", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ lines: JSON.parse(linesJson), city }),
+        body: JSON.stringify({ lines: JSON.parse(linesJson), city, referral_code: appliedCode }),
         cache: "no-store",
       })
         .then((response) => (response.ok ? response.json() : Promise.reject(response.status)))
@@ -186,13 +190,30 @@ function CheckoutFlow({ siteKey }: { siteKey: string }) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [linesJson, city]);
+  }, [linesJson, city, appliedCode]);
 
   if (settled) return <PlacedNotice order={settled.order} orderKey={settled.key} />;
 
+  // A quote from before the code was applied or removed isn't this one yet.
+  const quoteMatchesCode = !quote || (quote.referral?.code ?? null) === appliedCode;
+
   const changed = quote?.lines.filter((l) => l.status !== "ok" || l.price_changed) ?? [];
   const canPlace =
-    !!quote && quote.exact && quote.orders_open && !!token && !pending && !checking && !mustAbandon && !turnstileDown;
+    !!quote && quoteMatchesCode && quote.exact && quote.orders_open && !!token && !pending && !checking && !mustAbandon && !turnstileDown;
+
+  function applyCode(event?: React.SyntheticEvent) {
+    event?.preventDefault();
+    const code = normalizeReferralCode(codeInput);
+    setAppliedCode(code);
+    setCodeInput(code ?? "");
+    setMessage(null);
+  }
+
+  function removeCode() {
+    setAppliedCode(null);
+    setCodeInput("");
+    setMessage(null);
+  }
 
   function update(field: keyof CustomerInput, value: string) {
     setFields((current) => ({ ...current, [field]: value }));
@@ -237,6 +258,8 @@ function CheckoutFlow({ siteKey }: { siteKey: string }) {
           totalPaisa: quote.total_paisa,
           customer: fields,
           turnstileToken: token,
+          referralCode: appliedCode,
+          discountPaisa: appliedCode ? quote.discount_paisa : 0,
         });
       } catch {
         result = { status: "unknown" };
@@ -379,6 +402,15 @@ function CheckoutFlow({ siteKey }: { siteKey: string }) {
         ) : (
           <QuoteSummary quote={quote} lines={lines} changed={changed.length > 0} onAccept={acceptChanges} />
         )}
+        <ReferralField
+          input={codeInput}
+          applied={appliedCode}
+          referral={quote && quoteMatchesCode ? quote.referral : null}
+          checking={!!appliedCode && (!quote || !quoteMatchesCode) && !quoteFailed}
+          onInput={setCodeInput}
+          onApply={applyCode}
+          onRemove={removeCode}
+        />
       </section>
     </form>
   );
@@ -445,13 +477,23 @@ function QuoteSummary({
                   {line.unit_price_paisa !== null ? rupees(line.unit_price_paisa * (gone ? line.quantity : line.allowed_quantity)) : "—"}
                 </span>
               </div>
-              {!gone && line.unit_price_paisa !== null && (line.regular_price_paisa ?? 0) > line.unit_price_paisa ? (
+              {/* A "was" price only with a supported reference (never just the current regular price). */}
+              {!gone && line.unit_price_paisa !== null && (line.reference_price_paisa ?? 0) > line.unit_price_paisa ? (
                 <p className="mt-0.5 text-xs text-muted">
-                  Sale price {rupees(line.unit_price_paisa)} each; regular price{" "}
-                  <s className="decoration-danger">{rupees(line.regular_price_paisa!)}</s>
+                  Sale price {rupees(line.unit_price_paisa)} each; was{" "}
+                  <s className="decoration-danger">{rupees(line.reference_price_paisa!)}</s>
                 </p>
               ) : null}
               {note ? <p className="mt-0.5 text-xs font-medium text-danger">{note}</p> : null}
+              {!gone && quote.referral?.status === "ok" ? (
+                line.referral_eligible ? (
+                  <p className="mt-0.5 text-xs text-forest">Code {quote.referral.code}: −{rupees(line.discount_paisa)}</p>
+                ) : (
+                  <p className="mt-0.5 text-xs text-muted">
+                    {line.referral_excluded ? "Clearance item: referral codes don’t apply" : "Sale item: the code doesn’t apply"}
+                  </p>
+                )
+              ) : null}
             </li>
           );
         })}
@@ -469,6 +511,15 @@ function QuoteSummary({
           <dt className="text-muted">Subtotal</dt>
           <dd>{rupees(quote.subtotal_paisa)}</dd>
         </div>
+        {quote.discount_paisa > 0 ? (
+          <div className="flex justify-between text-forest">
+            <dt>
+              Referral discount ({quote.referral?.code}
+              {quote.referral?.discount_bp !== undefined ? `, ${formatPercent(quote.referral.discount_bp)}` : ""})
+            </dt>
+            <dd>−{rupees(quote.discount_paisa)}</dd>
+          </div>
+        ) : null}
         <div className="flex justify-between">
           <dt className="text-muted">Delivery</dt>
           <dd>
@@ -492,10 +543,92 @@ function QuoteSummary({
         <p className="mt-2 text-xs text-danger">We don’t deliver to this city yet.</p>
       ) : null}
       {quote.free_delivery_min_paisa !== null && quote.delivery_status === "ok" && quote.delivery_paisa > 0 ? (
-        <p className="mt-2 text-xs text-muted">Free delivery on orders of {rupees(quote.free_delivery_min_paisa)} or more.</p>
+        <p className="mt-2 text-xs text-muted">
+          Free delivery on orders of {rupees(quote.free_delivery_min_paisa)} or more
+          {quote.discount_paisa > 0 ? ", after any discount" : ""}.
+        </p>
       ) : null}
       {!quote.orders_open ? <p className="mt-2 text-xs text-danger">We aren’t taking orders at the moment.</p> : null}
     </>
+  );
+}
+
+const REFERRAL_MESSAGES: Record<Exclude<NonNullable<Quote["referral"]>["status"], "ok">, string> = {
+  invalid: "We don’t recognise this code. Check it, or remove it to continue.",
+  disabled: "This code isn’t accepted at the moment. Remove it to continue.",
+  no_eligible_items: "This code doesn’t apply to anything in your cart (sale items aren’t included). Remove it to continue.",
+};
+
+/**
+ * One referral code per order. Applying it re-checks the quote; the database
+ * decides whether it applies and works out the discount. Only the code and
+ * its discount are shown, never whose code it is.
+ */
+function ReferralField({
+  input,
+  applied,
+  referral,
+  checking,
+  onInput,
+  onApply,
+  onRemove,
+}: {
+  input: string;
+  applied: string | null;
+  referral: Quote["referral"];
+  checking: boolean;
+  onInput: (value: string) => void;
+  onApply: (event?: React.SyntheticEvent) => void;
+  onRemove: () => void;
+}) {
+  const problem = referral && referral.status !== "ok" ? REFERRAL_MESSAGES[referral.status] : null;
+  return (
+    <div className="mt-5 border-t border-line pt-4">
+      {applied ? (
+        <div className="flex items-start justify-between gap-3 text-sm">
+          <div aria-live="polite">
+            <p className="font-semibold">Referral code {applied}</p>
+            {checking ? (
+              <p className="mt-0.5 text-xs text-muted">Checking…</p>
+            ) : problem ? (
+              <p className="mt-0.5 text-xs font-medium text-danger">{problem}</p>
+            ) : referral?.status === "ok" ? (
+              <p className="mt-0.5 text-xs text-forest">
+                Applied{referral.discount_bp !== undefined ? `: ${formatPercent(referral.discount_bp)} off` : ""}
+                {referral.applies_to_sale_items === false ? " (not on sale items)" : ""}.
+              </p>
+            ) : null}
+          </div>
+          <button type="button" onClick={onRemove} className="btn btn-outline h-9 shrink-0 px-3 text-sm">
+            Remove
+          </button>
+        </div>
+      ) : (
+        <div>
+          <label htmlFor="referral-code" className={LABEL}>
+            Referral code (optional)
+          </label>
+          <div className="flex gap-2">
+            <input
+              id="referral-code"
+              className={`${INPUT} h-10 uppercase`}
+              autoComplete="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              maxLength={CODE_INPUT_MAX}
+              value={input}
+              onChange={(e) => onInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") onApply(e);
+              }}
+            />
+            <button type="button" onClick={onApply} disabled={!normalizeReferralCode(input)} className="btn btn-outline h-10 shrink-0 px-4 text-sm">
+              Apply
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

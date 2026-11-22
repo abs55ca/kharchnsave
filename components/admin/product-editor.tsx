@@ -69,7 +69,12 @@ type Saved = { values: ProductFormValues; photos: AdminPhoto[] };
 
 const snapshot = (saved: Saved) => JSON.stringify(saved);
 
-export function ProductEditor({ product, created = false }: { product?: EditableProduct; created?: boolean }) {
+/**
+ * `priceLock`: why the prices can't be typed here (automatic pricing, or a
+ * running sale): the inputs become read-only and still send the saved values,
+ * which the database requires to stay unchanged (Pricing / Sales change them).
+ */
+export function ProductEditor({ product, created = false, priceLock = null }: { product?: EditableProduct; created?: boolean; priceLock?: string | null }) {
   const isNew = !product;
   const id = useId();
   const fieldId = (name: string) => `${id}-${name}`;
@@ -545,6 +550,7 @@ export function ProductEditor({ product, created = false }: { product?: Editable
                   autoComplete="off"
                   value={values.price}
                   onChange={(e) => set("price", e.target.value)}
+                  readOnly={!!priceLock}
                   required
                   aria-invalid={errors.price ? true : undefined}
                   aria-describedby={describedBy("price", true)}
@@ -552,7 +558,7 @@ export function ProductEditor({ product, created = false }: { product?: Editable
                 />
               </div>
               <p id={`${fieldId("price")}-hint`} className={HINT}>
-                e.g. 8500 or 8,500.50. Must be above zero to publish.
+                {priceLock ?? "e.g. 8500 or 8,500.50. Must be above zero to publish."}
               </p>
               {errorText("price")}
             </div>
@@ -571,6 +577,7 @@ export function ProductEditor({ product, created = false }: { product?: Editable
                   autoComplete="off"
                   value={values.salePrice}
                   onChange={(e) => set("salePrice", e.target.value)}
+                  readOnly={!!priceLock}
                   aria-invalid={errors.salePrice || salePreview.problem ? true : undefined}
                   aria-describedby={describedBy("salePrice", true)}
                   className={`${INPUT} h-11`}
@@ -585,7 +592,10 @@ export function ProductEditor({ product, created = false }: { product?: Editable
                   <span className="font-medium text-danger">{salePreview.problem}</span>
                 ) : salePreview.prices ? (
                   <>
-                    <span className="mb-1 block text-xs text-muted">Customers see and pay:</span>
+                    <span className="mb-1 block text-xs text-muted">
+                      Customers pay the price shown first. The crossed-out price and % badge appear only if price history shows
+                      the product was offered at that regular price before the sale (Pricing, “Price history”).
+                    </span>
                     <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
                       <ProductPrice product={salePreview.prices} size="card" />
                       {salePreview.prices.regularPrice !== null ? (
