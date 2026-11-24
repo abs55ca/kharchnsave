@@ -5,6 +5,7 @@ import { showsLightUpBadge } from "@/lib/catalog/light-up";
 import { isOnSale, saleBadgeText } from "@/lib/catalog/pricing";
 import { isInStock, productHref, sizeLabel } from "@/lib/catalog/product-utils";
 import type { Product } from "@/lib/catalog/types";
+import { kidsAgeLabel } from "@/lib/sizes";
 import { LightUpBadge, SaleBadge, SoldOutBadge, StatusBadge } from "./badges";
 import { ProductPrice } from "./product-price";
 
@@ -19,6 +20,7 @@ export const PRODUCT_GRID_SIZES =
 export function ProductCard({ product, eager = false }: { product: Product; eager?: boolean }) {
   const image = product.images[0];
   const inStock = isInStock(product);
+  const kidsAge = product.department === "kids" ? kidsAgeLabel(product.variants.map((v) => v.size)) : null;
 
   return (
     <article className="group relative flex flex-col rounded-md has-[a:focus-visible]:outline-2 has-[a:focus-visible]:outline-offset-4 has-[a:focus-visible]:outline-forest">
@@ -42,9 +44,12 @@ export function ProductCard({ product, eager = false }: { product: Product; eage
         </div>
       </div>
       <div className="mt-2.5 flex flex-1 flex-col gap-0.5">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-          {product.brand}
-        </p>
+        {/* "Unbranded" says nothing useful on a card; real brands still show. */}
+        {product.brand.trim().toLowerCase() !== "unbranded" ? (
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+            {product.brand}
+          </p>
+        ) : null}
         <h3 className="font-sans text-sm font-medium leading-snug">
           <Link
             href={productHref(product)}
@@ -54,10 +59,21 @@ export function ProductCard({ product, eager = false }: { product: Product; eage
             {product.name.replace(" — ", " — ")}
           </Link>
         </h3>
+        {/* New shoes already carry the NEW badge on the photo; pre-loved ones show their condition. */}
         <p className="text-xs text-muted">
           <span className="font-medium text-ink">{sizeLabel(product)}</span>
-          <span aria-hidden="true"> · </span>
-          {product.status === "new" ? "Brand new" : CONDITION_LABELS[product.condition]}
+          {kidsAge ? (
+            <>
+              <span aria-hidden="true"> · </span>
+              {kidsAge}
+            </>
+          ) : null}
+          {product.status === "new" ? null : (
+            <>
+              <span aria-hidden="true"> · </span>
+              {CONDITION_LABELS[product.condition]}
+            </>
+          )}
         </p>
         <ProductPrice product={product} size="card" className="mt-1" />
       </div>

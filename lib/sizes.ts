@@ -42,6 +42,56 @@ export const KIDS_SIZES: KidsSize[] = [
   { eu: 30, uk: 11.5, us: 12.5, footCm: 18.5 },
 ];
 
+/**
+ * Typical age for a kids' EU size, in months [from, to]. Approximate: feet
+ * grow at different rates, so the size (and foot length) is what to go by.
+ */
+const KIDS_AGE_MONTHS: Record<number, [number, number]> = {
+  18: [6, 12],
+  19: [12, 15],
+  20: [15, 18],
+  21: [18, 21],
+  22: [18, 24],
+  23: [24, 24],
+  24: [24, 36],
+  25: [24, 36],
+  26: [36, 36],
+  27: [36, 48],
+  28: [48, 48],
+  29: [48, 60],
+  30: [60, 60],
+  31: [60, 72],
+  32: [72, 84],
+  33: [84, 96],
+  34: [96, 108],
+  35: [108, 120],
+  36: [120, 132],
+  37: [132, 144],
+};
+
+function formatAge(from: number, to: number) {
+  const months = (m: number) => `${m}`;
+  const years = (m: number) => `${Math.round(m / 12)}`;
+  if (to < 24 || (to === 24 && from < 24)) {
+    return from === to ? `${months(from)} months` : `${months(from)}–${months(to)} months`;
+  }
+  if (from < 24) return `${months(from)} months–${years(to)} yrs`;
+  const a = years(from);
+  const b = years(to);
+  return a === b ? `Age ${a}` : `Age ${a}–${b}`;
+}
+
+/**
+ * Typical age for kids' EU sizes, e.g. "Age 5", "Age 3–4" or "18–24 months";
+ * for several sizes, from the smallest's youngest to the largest's oldest.
+ * Half sizes count as the whole size below. Null when no size is in the table.
+ */
+export function kidsAgeLabel(sizes: number[]) {
+  const ranges = sizes.map((s) => KIDS_AGE_MONTHS[Math.floor(s)]).filter((r): r is [number, number] => Boolean(r));
+  if (ranges.length === 0) return null;
+  return formatAge(Math.min(...ranges.map((r) => r[0])), Math.max(...ranges.map((r) => r[1])));
+}
+
 /** Adult EU sizes offered as shortcuts on the homepage. */
 export const ADULT_EU_SHORTCUTS = ADULT_SIZES.map((s) => s.eu);
 
