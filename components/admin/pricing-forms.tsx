@@ -48,6 +48,7 @@ const REASONS: Record<string, string> = {
   too_small: "Too small for the price ending: needs review",
   sale_too_small: "The sale price would be too small: needs review",
   manual_sale_conflict: "Its manual sale price would be at or above the new regular price",
+  size_sale_running: "It's in a running size sale (Sales by size): end that sale first",
   giveaway_on_sale: "A giveaway can't be on sale",
   margin_violation: "Below the minimum profit/margin in the worst referral case",
   cost_unknown: "Cost unknown, so the minimum margin can't be checked",

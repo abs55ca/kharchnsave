@@ -11,10 +11,16 @@
 //                                  { code, message, details, hint }
 //   GET  /rest/v1/products         the published catalogue (as anon), shaped
 //                                  like the storefront's select
+//   GET  /rest/v1/products?select=…publication_status…
+//                                  the admin product list (as the caller):
+//                                  status filter, search, order, page, count
 //   GET  /rest/v1/admin_members    the admin access check (as the caller)
 //   GET  /rest/v1/product_images?select=storage_path&id=eq.…&product_id=eq.…
 //                                  a photo's stored path (as the caller): the
 //                                  admin photo preview and photo flip lookup
+//   GET  /rest/v1/product_variants?select=product_id,size_eu&product_id=in.(…)
+//                                  sizes of products (as the caller): the
+//                                  Pricing page's "Sizes in this group"
 //   GET  /rest/v1/orders?id=eq.<id> one order with its items and history, the
 //                                  admin order page's read (as the caller, so
 //                                  only a verified admin gets a row)
@@ -275,6 +281,41 @@ export async function startShim({ connection, port, authSecret = null, serviceKe
     try {
       if (url.pathname.startsWith("/auth/v1/") && authSecret) return await auth(req, res, url);
       if (url.pathname.startsWith("/storage/v1/object/") && authSecret) return await storage(req, res, url);
+      if (req.method === "GET" && url.pathname === "/rest/v1/products" && (url.searchParams.get("select") ?? "").includes("publication_status")) {
+        // The admin product list (lib/admin/products.ts listProducts), as the caller: status filter,
+        // search words (each an "or" of ilike conditions), newest first, a page (offset/limit), and the count.
+        const params = [];
+        const where = [];
+        const status = /^eq\.(draft|published|archived)$/.exec(url.searchParams.get("publication_status") ?? "")?.[1];
+        if (status) {
+          params.push(status);
+          where.push(`p.publication_status = $${params.length}`);
+        }
+        for (const or of url.searchParams.getAll("or")) {
+          const word = /^\(name\.ilike\.%(.*?)%,/.exec(or)?.[1];
+          if (word === undefined) return send(res, 400, { code: "PGRST100", message: "unsupported filter", details: null, hint: null });
+          params.push(`%${word}%`);
+          const n = params.length;
+          where.push(`(p.name ilike $${n} or p.brand ilike $${n} or p.item_code ilike $${n} or p.slug ilike $${n} or p.colour ilike $${n})`);
+        }
+        const filter = where.length ? `where ${where.join(" and ")}` : "";
+        const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
+        const limit = Math.max(0, Number(url.searchParams.get("limit") ?? 1000) || 0);
+        const claims = callerClaims(req);
+        const { rows } = await as(claims, `
+          select coalesce(json_agg(x order by x.updated_at desc, x.id), '[]'::json) as body from (
+            select p.id, p.item_code, p.name, p.brand, p.publication_status, p.item_status, p.price_paisa, p.sale_price_paisa, p.updated_at,
+              coalesce((select json_agg(json_build_object('stock', v.stock)) from public.product_variants v where v.product_id = p.id), '[]'::json) as product_variants,
+              coalesce((select json_agg(json_build_object('id', i.id, 'src', i.src, 'storage_path', i.storage_path, 'sort_order', i.sort_order))
+                        from public.product_images i where i.product_id = p.id), '[]'::json) as product_images
+            from public.products p ${filter}
+            order by p.updated_at desc, p.id offset ${offset} limit ${limit}
+          ) x`, params);
+        const total = (await as(claims, `select count(*)::int as n from public.products p ${filter}`, params)).rows[0].n;
+        const body = rows[0].body;
+        res.writeHead(200, { "content-type": "application/json", "content-range": `${offset}-${offset + Math.max(body.length - 1, 0)}/${total}` });
+        return res.end(JSON.stringify(body));
+      }
       if (req.method === "GET" && url.pathname === "/rest/v1/products") {
         const { rows } = await as(null, CATALOGUE, []);
         return send(res, 200, rows[0].body);
@@ -283,6 +324,15 @@ export async function startShim({ connection, port, authSecret = null, serviceKe
         const filter = /^eq\.([0-9a-f-]{36})$/.exec(url.searchParams.get("user_id") ?? "");
         if (!filter) return send(res, 400, { code: "PGRST100", message: "unsupported filter", details: null, hint: null });
         const { rows } = await as(callerClaims(req), "select user_id from public.admin_members where user_id = $1", [filter[1]]);
+        return send(res, 200, rows);
+      }
+      if (req.method === "GET" && url.pathname === "/rest/v1/product_variants") {
+        // The Pricing page's "Sizes in this group" read (as the caller, so RLS applies).
+        const ids = /^in\.\(([0-9a-f,-]*)\)$/.exec(url.searchParams.get("product_id") ?? "")?.[1]?.split(",").filter(Boolean);
+        if (!ids || url.searchParams.get("select") !== "product_id,size_eu") {
+          return send(res, 400, { code: "PGRST100", message: "unsupported query", details: null, hint: null });
+        }
+        const { rows } = await as(callerClaims(req), "select product_id, size_eu from public.product_variants where product_id = any($1::uuid[])", [ids]);
         return send(res, 200, rows);
       }
       if (req.method === "GET" && url.pathname === "/rest/v1/product_images") {

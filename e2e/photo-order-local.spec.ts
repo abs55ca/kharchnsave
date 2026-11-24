@@ -208,3 +208,20 @@ test("an uploaded photo is flipped left to right; saving keeps the flipped copy 
   expect(await storedFile(`${productId}/${originalId}.webp`)).toBe(false);
   await context.close();
 });
+
+test("light-up soles: choosing Yes and saving records both shoes working (no extra fields)", async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL, viewport: { width: 1280, height: 900 } });
+  await signInAdmin(context, baseURL!);
+  const page = await context.newPage();
+  await page.goto(`/admin/products/${productId}`);
+  const section = page.locator("fieldset").filter({ hasText: "Light-up soles?" }).filter({ visible: true }).first();
+  await expect(section.getByText("choose Yes only after checking that both shoes light up", { exact: false })).toBeVisible();
+  await section.getByLabel("Yes").check();
+  await expect(page.getByText("Do the lights work?")).toHaveCount(0);
+  await expect(page.getByText("How the lights activate")).toHaveCount(0);
+  await page.getByRole("button", { name: "Save changes" }).filter({ visible: true }).first().click();
+  await expect(page.getByText("Saved.", { exact: true }).filter({ visible: true }).first()).toBeVisible();
+  const row = (await db!.query("select light_up, light_up_condition, light_up_activation from public.products where id = $1", [productId])).rows[0];
+  expect(row).toEqual({ light_up: true, light_up_condition: "both_work", light_up_activation: null });
+  await context.close();
+});

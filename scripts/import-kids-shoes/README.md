@@ -59,13 +59,45 @@ preview and your "yes". Running it again changes nothing. The shoes stay drafts.
 Later, changing the group's maximum on the **Pricing** page reprices them all together, keeping
 each one's size-based score.
 
+## Promotion: raise the prices, then a genuine sale
+
+`promote.mts` runs a two-phase promotion using the **promotion planner's** saved percentages:
+20, 25, 30 or 35%, assigned at random per shoe model with a fixed seed. It saves them first if
+needed. It needs the planner's migration (`20261123120000_promotion_planner`) on the project.
+
+1. **`raise`** (asks you to type "yes"):
+   - Each shoe's regular price becomes its current price ÷ (1 − its percentage), rounded **up**
+     to the whole rupee (e.g. Rs. 3,795 at 35% → Rs. 5,839).
+   - The shoes switch to manual pricing (their score and group stay recorded) and are
+     **published**.
+   - The Pricing settings get a **28-day** minimum before a price can count as a "was" price.
+   - Customers pay these prices for at least 28 days.
+2. **`start-sale`**, 28 days later:
+   - Each shoe that has been published at its raised price, with no sale, for 28 days goes on
+     sale at its original price.
+   - The database decides the crossed-out "was" price from the price history. If it doesn't
+     accept one, that shoe's sale is undone and listed.
+   - Shoes not ready yet are listed with the date they will be. Run it again later for them.
+
+```sh
+npx tsx --tsconfig scripts/import-kids-shoes/tsconfig.json scripts/import-kids-shoes/promote.mts raise
+npx tsx --tsconfig scripts/import-kids-shoes/tsconfig.json scripts/import-kids-shoes/promote.mts start-sale
+```
+
+Progress is kept in `C:\Users\abs55\Documents\KharchnSave\images\kids-shoes-promotion.json`. It
+records each shoe's original price for phase 2, so keep it. Both commands can be run again safely.
+
+Changing a shoe's price or unpublishing it during the 28 days restarts its 28 days. Don't use the
+planner's **Refresh proposals** after phase 1: it would recalculate the proposals from the raised
+prices (the percentages and this promotion are unaffected).
+
 ## Afterwards
 
-1. Check the prices, then publish the shoes.
+1. Check the prices, then publish the shoes (or run the promotion above, which publishes them).
 2. Add Folder 43 by hand once you know its size.
 
 ## Tests
 
-- `npx vitest run --config scripts/import-kids-shoes/vitest.config.mts`: resume and retry rules with a fake Supabase, and the size scores and prices.
+- `npx vitest run --config scripts/import-kids-shoes/vitest.config.mts`: resume and retry rules with a fake Supabase, the size scores and prices, and the promotion's raised prices and 28-day check.
 - `--dry-run`: every listing passes the admin form's checks, and every photo goes through the
   site's photo processing.

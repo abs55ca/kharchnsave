@@ -5,7 +5,9 @@ import { AccessNotice } from "@/components/admin/access-notice";
 import { AdminNav } from "@/components/admin/admin-nav";
 import { RequestScope } from "@/components/admin/agent-forms";
 import { BulkPricingTable, CreateGroupForm, GroupMaxEditor, SettingsForm } from "@/components/admin/pricing-forms";
-import { getPricingOverview, getPricingProducts, type PricingOverview, type PricingProduct } from "@/lib/admin/pricing";
+import { SizeSalesPanel } from "@/components/admin/size-sales-panel";
+import { getPricingOverview, getPricingProducts, getGroupSizes, getSizeSaleOverview, isMissingFunction, type PricingOverview, type PricingProduct } from "@/lib/admin/pricing";
+import type { SizeSaleOverview } from "@/lib/pricing/size-sale-types";
 import { getAdminPageClient } from "@/lib/auth/admin";
 import { formatPrice } from "@/lib/format";
 import { formatBp } from "@/lib/pricing/rules";
@@ -45,6 +47,25 @@ async function Pricing({ searchParams }: Pick<PageProps<"/admin/pricing">, "sear
   } catch (error) {
     console.error("[admin]", (error as Error).message);
   }
+  // Optional on this page: without the size sales migration, only this section is unavailable.
+  let sizeSales: Record<string, SizeSaleOverview> | null = null;
+  let groupSizes: Record<string, { size: number; products: number }[]> = {};
+  let sizeSalesNotInstalled = false;
+  if (overview) {
+    try {
+      const [list, sizes] = await Promise.all([
+        Promise.all(overview.groups.map((g) => getSizeSaleOverview(supabase, g.id))),
+        // Helpful, not essential: without it the panel just doesn't list the sizes.
+        Promise.all(overview.groups.map(async (g) => [g.id, await getGroupSizes(supabase, g.id).catch(() => null)] as const)),
+      ]);
+      sizeSales = Object.fromEntries(list.map((o) => [o.group_id, o]));
+      groupSizes = Object.fromEntries(sizes.filter(([, v]) => v !== null)) as Record<string, { size: number; products: number }[]>;
+    } catch (error) {
+      // Not installed on this database yet is a setup state, shown below; anything else is an error.
+      if (isMissingFunction(error)) sizeSalesNotInstalled = true;
+      else console.error("[admin]", (error as Error).message);
+    }
+  }
 
   return (
     <>
@@ -78,6 +99,21 @@ async function Pricing({ searchParams }: Pick<PageProps<"/admin/pricing">, "sear
               <h2 id="groups-heading" className="text-lg font-bold">Groups and maximum prices</h2>
               <GroupMaxEditor groups={overview.groups} outOfDate={overview.counts.out_of_date} />
               <CreateGroupForm />
+            </section>
+
+            <section aria-labelledby="size-sales-heading" className="space-y-4">
+              <h2 id="size-sales-heading" className="text-lg font-bold">Sales by size</h2>
+              {sizeSales ? (
+                <SizeSalesPanel groups={overview.groups} overviews={sizeSales} sizes={groupSizes} />
+              ) : sizeSalesNotInstalled ? (
+                <p role="status" className="rounded-md border border-line p-3 text-sm">
+                  Sales by size isn&apos;t set up on this database yet. It needs the database update{" "}
+                  <code className="font-mono text-xs">supabase/migrations/20261124120000_size_sales.sql</code> (README, &ldquo;Sales by
+                  size&rdquo;). Everything else on this page works without it.
+                </p>
+              ) : (
+                <p role="alert" className="text-sm text-danger">Sales by size couldn&apos;t be loaded right now.</p>
+              )}
             </section>
 
             <section aria-labelledby="bulk-heading" className="space-y-4">

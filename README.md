@@ -215,6 +215,8 @@ Notes:
 | `db-tests/pricing.test.ts`, `db-tests/sale-schedule-script.test.ts` | Tests for the pricing migration and the schedule script on real PostgreSQL |
 | `supabase/migrations/20261122150000_product_deletion.sql` | Permanent product deletion with every order containing it: preview with a token, typed confirmation, refusals for unfinished orders, refunds due and paid-out commission, a deletion log; the append-only guards let only this function delete (see [Deleting a product permanently](#deleting-a-product-permanently)) |
 | `supabase/migrations/20261123120000_promotion_planner.sql` | Promotion planner (admin only): a discount percentage per product and the regular price it implies from the selling price, stored apart from prices and history; never shown to shoppers (see [Promotion planner](#promotion-planner)) |
+| `supabase/migrations/20261124120000_size_sales.sql` | Sales by size (Pricing page): discount rules by EU size per pricing group, previewed per product, applied and ended as one size sale; the price guard and repricing treat its products like campaign products (see [Sales by size](#sales-by-size)) |
+| `db-tests/size-sales.test.ts` | Tests for that migration: rules, matching and rounding (agreeing with the form), eligibility and reasons, applying, repeats, stale previews, conflicts with campaigns, manual sales and repricing, ending, checkout prices |
 | `db-tests/promotions.test.ts` | Tests for that migration: access, proposals worked out by the database, stable percentages, and no change to prices, history, quotes or orders |
 | `db-tests/product-deletion.test.ts` | Tests for that migration on real PostgreSQL (permissions, what is deleted and kept, refusals, stale previews, retries, a race with checkout, the guards outside a deletion) |
 | `supabase/tests/item_codes_sale_prices_test.sql` | Tests for code assignment and collisions, existing codes, the sale price rules, quotes, free delivery, orders and in-store sales at sale prices, and historical orders. Rolls back and puts its counters back |
@@ -2151,6 +2153,66 @@ the site version with the planner has **not** been deployed, so it isn't live an
 
 **Setup (owner).** Apply `20261123120000_promotion_planner.sql` (needs every earlier migration),
 then deploy. Without the migration, only the planner page fails to load; everything else works.
+
+### Sales by size
+
+**Pricing → Sales by size** puts products of one pricing group on sale with a percentage chosen by
+EU size, e.g. EU 25–30 at 30% and EU 36 at 35%.
+
+- **Rules:** a single size, or an inclusive range. Whole or half sizes (29.5 matches 25–30), never
+  rounded. A single-size rule overrides a range. Overlapping ranges and two rules for one size are
+  refused, row by row. Unmatched sizes get the optional default discount; without one, no sale.
+  Rules are saved per group when applied ([`lib/pricing/size-rules.ts`](lib/pricing/size-rules.ts)
+  mirrors the database's checks for instant feedback).
+- **Prices:** sale price = regular price × (1 − discount), in whole paisa, rounded half up. Always
+  from the regular price (never compounded onto a sale price). Regular prices, scores, group
+  maximums and the score formula don't change. The customer price changes to the sale price; the
+  preview shows both.
+- **Preview:** every product in the group, with its EU size(s), matching rule, regular price,
+  current customer price, sale price, the actual saving and percentage, margin (or "Cost
+  unknown"), and its status:
+  - **Eligible:** goes on sale when applied.
+  - **Unchanged:** no rule matches, or it's already on this sale.
+  - **Blocked**, with the reason:
+    - not published;
+    - free;
+    - in another sale campaign (named);
+    - a manual sale price;
+    - margin rule;
+    - sizes under different rules.
+
+  Counts come first, and when nothing qualifies, the reasons are summarised.
+- **Sizes and products:** prices are per product, and a size is a product's variant. The
+  imported kids' shoes are one product per size, so each size gets its own rule. A product with
+  several sizes goes on sale only if all its sizes get the same percentage; otherwise it is blocked
+  ("its sizes fall under different rules"), never discounted at one rate for every size. So the
+  shop never needs a "From" price, and its cards, product pages, cart and checkout keep using the
+  one server-side price.
+- **Apply eligible sales:** the database recomputes the plan and applies it only if it matches the
+  preview's token (otherwise nothing changes and the new preview is shown). It applies everything
+  in one transaction, recorded in the price history ("size_sale_start"). A retry of the same request
+  gets its original answer; applying again adds only newly eligible products. One size sale runs
+  per group; to change its rules, end it first.
+- **"Was" prices:** the existing rule decides. The shop crosses out the regular price only if the
+  product was genuinely offered at it (published, no sale, for the minimum days). Otherwise it
+  shows the sale price alone. The preview says which.
+- **Conflicts:**
+  - While a product is in a running size sale, its prices can't be edited on its product page.
+  - Sale campaigns skip it ("other_sale").
+  - Repricing a group skips it ("It's in a running size sale").
+  - A size sale never overwrites a campaign's or a manual sale price.
+- **End size-based sales:** removes only this sale's sale prices (regular prices stay) and records
+  "size_sale_end".
+- The promotion planner's saved assignments are not read or changed.
+
+**Setup (owner).** Apply `20261124120000_size_sales.sql` (after every earlier migration, through
+`20261123120000_promotion_planner.sql`), then deploy. It seeds the editable starting rules (EU 25–30
+at 30%, EU 36 at 35%) for a group named "Kids Sneakers" if one exists. Without the migration, only
+this section of the Pricing page is unavailable.
+
+**Status (2026-11-24).** Implemented and tested locally only (unit, database and browser tests on a
+local stand-in). The migration has **not** been applied to any hosted project, the site version with
+this feature has **not** been deployed, and no live sale has been started.
 
 ## Enabling online payments
 

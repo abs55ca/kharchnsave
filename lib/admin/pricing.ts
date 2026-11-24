@@ -1,5 +1,6 @@
 import "server-only";
 import type { AdminSessionClient } from "@/lib/auth/admin";
+import type { SizeSaleOverview } from "@/lib/pricing/size-sale-types";
 import { readTimeout } from "@/lib/supabase/config";
 
 /*
@@ -236,11 +237,18 @@ export type ScheduleHealth = {
   overdue: Campaign[];
 };
 
-export class PricingDataError extends Error {}
+export class PricingDataError extends Error {
+  constructor(message: string, readonly code: string | null = null) {
+    super(message);
+  }
+}
+
+/** PostgREST's "function not found": the migration that adds it isn't applied to this database. */
+export const isMissingFunction = (error: unknown) => error instanceof PricingDataError && error.code === "PGRST202";
 
 async function read<T>(supabase: AdminSessionClient, fn: string, args: Record<string, unknown> = {}): Promise<T> {
   const { data, error } = await supabase.rpc(fn, args).abortSignal(readTimeout());
-  if (error) throw new PricingDataError(`${fn} failed (${error.code || "no code"}).`);
+  if (error) throw new PricingDataError(`${fn} failed (${error.code || "no code"}).`, error.code || null);
   return data as T;
 }
 
@@ -253,6 +261,28 @@ export const getCampaign = (s: AdminSessionClient, id: string) => read<CampaignP
 export const getCampaignCandidates = (s: AdminSessionClient, id: string) => read<Candidate[]>(s, "admin_campaign_candidates", { p_campaign_id: id });
 export const getCoverage = (s: AdminSessionClient) => read<Coverage>(s, "admin_sale_coverage");
 export const getScheduleHealth = (s: AdminSessionClient) => read<ScheduleHealth>(s, "admin_sale_schedule_health");
+export const getSizeSaleOverview = (s: AdminSessionClient, groupId: string) => read<SizeSaleOverview>(s, "admin_size_sale_overview", { p_group_id: groupId });
+
+/** Every EU size the products of a group come in, with how many products have it (for Sales by size). */
+export async function getGroupSizes(supabase: AdminSessionClient, groupId: string): Promise<{ size: number; products: number }[]> {
+  const ids: string[] = [];
+  for (let offset = 0; ; offset += 500) {
+    const page = await read<{ total: number; items: { product_id: string }[] }>(supabase, "admin_pricing_products",
+      { p_filter: { group_id: groupId, limit: 500, offset } });
+    ids.push(...page.items.map((i) => i.product_id));
+    if (page.items.length < 500) break;
+  }
+  const counts = new Map<number, Set<string>>();
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data, error } = await supabase.from("product_variants").select("product_id, size_eu").in("product_id", ids.slice(i, i + 100)).abortSignal(readTimeout());
+    if (error) throw new PricingDataError(`Couldn't read the group's sizes (${error.code || "no code"}).`, error.code || null);
+    for (const row of (data ?? []) as { product_id: string; size_eu: number | string }[]) {
+      const size = Number(row.size_eu);
+      counts.set(size, (counts.get(size) ?? new Set()).add(row.product_id));
+    }
+  }
+  return [...counts.entries()].map(([size, products]) => ({ size, products: products.size })).sort((a, b) => a.size - b.size);
+}
 
 /** Why a line wasn't (or can't be) applied, for admins. */
 export const REASONS: Record<string, string> = {
@@ -264,6 +294,7 @@ export const REASONS: Record<string, string> = {
   too_small: "Too small for the price ending: needs review",
   sale_too_small: "The sale price would be too small: needs review",
   manual_sale_conflict: "Its manual sale price would be at or above the new regular price",
+  size_sale_running: "It's in a running size sale (Sales by size): end that sale first",
   giveaway_on_sale: "A giveaway can't be on sale",
   margin_violation: "Below the minimum profit/margin in the worst referral case",
   cost_unknown: "Cost unknown, so the minimum margin can't be checked",
@@ -328,7 +359,8 @@ export function describePricingError(error: { code?: string; hint?: string | nul
   if (!error) return "That didn't work. Reload the page and try again.";
   if (error.code === "42501") return "Your session no longer has admin access. Sign in again in a new tab, then retry.";
   if (error.code === "55P03" || error.code === "40P01" || error.code === "40001") return "Someone else is changing prices right now. Try again in a moment.";
-  if (error.hint === "campaign_overlap" && error.message) return error.message;
+  // Messages written for admins by the database itself (row-by-row rule problems, or why a size sale must end first).
+  if ((error.hint === "campaign_overlap" || error.hint === "invalid_size_rules" || error.hint === "size_sale_running" || error.hint === "stale") && error.message) return error.message;
   if (error.hint && HINTS[error.hint]) return HINTS[error.hint];
   if (error.code === "PT404") return "Not found. Reload the page.";
   return "That didn't work. Reload the page and try again.";

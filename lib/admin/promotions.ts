@@ -22,6 +22,8 @@ export type OverviewItem = {
   group_key: string;
   mode: "auto" | "manual";
   score: number | null;
+  regular_price_paisa: number;
+  sale_price_paisa: number | null;
   selling_price_paisa: number;
   public_reference_paisa: number | null;
   sizes: number[];

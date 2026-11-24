@@ -15,12 +15,15 @@ import {
 } from "@/lib/admin/product-input";
 import {
   adminPhotoSrc,
+  cleanSearch,
   describeDbError,
   getEditableProduct,
+  listProducts,
   type AdminPhoto,
   type EditableProduct,
   type PublicationStatus,
 } from "@/lib/admin/products";
+import { BULK_PUBLISH_BATCH } from "@/lib/admin/bulk-publish";
 import { answerForDbError, type BlockedReason } from "@/lib/admin/request-outcome";
 import { getAdminClient, type AdminAccess, type AdminSessionClient } from "@/lib/auth/admin";
 import { photoCacheTag, photoObjectPath, PRODUCT_PHOTOS_BUCKET, UUID_PATTERN } from "@/lib/catalog/photos";
@@ -489,4 +492,99 @@ export async function deleteProductAction(_previous: DeleteProductState, formDat
     deletedItemCode: result.item_code,
     message: `${result.replayed ? "Already deleted earlier: " : "Deleted "}${result.item_code}${orders ? ` and ${orders} order${orders === 1 ? "" : "s"}` : ""}.`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Publishing several drafts at once (the product list)
+// ---------------------------------------------------------------------------
+
+export type BulkPublishResult = {
+  id: string;
+  itemCode: string | null;
+  name: string | null;
+  outcome: "published" | "already" | "skipped" | "failed";
+  message?: string;
+};
+
+/**
+ * Publishes drafts one by one with the same checks and database function as a
+ * product's own Publish button. Each product succeeds or fails on its own; every
+ * product gets an outcome (nothing is skipped silently). Safe to repeat: one
+ * already published is reported as such.
+ */
+export async function publishProducts(ids: string[]): Promise<{ ok: true; results: BulkPublishResult[] } | { ok: false; error: string }> {
+  const { access, supabase } = await getAdminClient();
+  if (!supabase) return { ok: false, error: accessMessage(access) };
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > BULK_PUBLISH_BATCH || !ids.every((id) => typeof id === "string" && UUID_PATTERN.test(id))) {
+    return { ok: false, error: "This page is out of date. Reload it." };
+  }
+
+  const results: BulkPublishResult[] = [];
+  for (const id of ids) {
+    try {
+      const product = await getEditableProduct(supabase, id);
+      if (!product) {
+        results.push({ id, itemCode: null, name: null, outcome: "failed", message: "It no longer exists." });
+        continue;
+      }
+      const base = { id, itemCode: product.values.itemCode, name: product.values.name };
+      if (product.status === "published") {
+        results.push({ ...base, outcome: "already" });
+        continue;
+      }
+      if (product.status !== "draft") {
+        results.push({ ...base, outcome: "skipped", message: "It's archived: restore it as a draft first." });
+        continue;
+      }
+      const problems = publishProblems({
+        pricePaisa: rupeesToPaisa(product.values.price) ?? 0,
+        description: product.values.description,
+        styles: product.values.styles,
+        sizeCount: product.values.sizes.length,
+        photoCount: product.photos.length,
+      });
+      if (problems.length > 0) {
+        results.push({ ...base, outcome: "skipped", message: `Add ${problems.join(", ")} first.` });
+        continue;
+      }
+      const { error } = await supabase.rpc("admin_set_publication_status", {
+        p_product_id: id,
+        p_expected_version: product.version,
+        p_status: "published",
+      });
+      if (error) {
+        const problem = describeDbError(error);
+        if (problem.kind === "general") console.error("[admin] Bulk publish failed:", error.code);
+        results.push({ ...base, outcome: "failed", message: problem.message });
+        continue;
+      }
+      results.push({ ...base, outcome: "published" });
+    } catch (error) {
+      unstable_rethrow(error);
+      console.error("[admin] Bulk publish failed:", (error as Error).name);
+      results.push({ id, itemCode: null, name: null, outcome: "failed", message: "It couldn't be published right now. Try again." });
+    }
+  }
+  if (results.some((r) => r.outcome === "published")) updateTag(CATALOGUE_TAG);
+  return { ok: true, results };
+}
+
+/** Every draft matching the list's search (all pages; at most 500), for "Select all drafts in this list". */
+export async function listDraftIds(q: string): Promise<{ ok: true; ids: string[] } | { ok: false; error: string }> {
+  const { access, supabase } = await getAdminClient();
+  if (!supabase) return { ok: false, error: accessMessage(access) };
+  try {
+    const search = cleanSearch(q);
+    const ids: string[] = [];
+    for (let page = 1; page <= 25; page++) {
+      const { items, total } = await listProducts(supabase, { q: search, status: "draft", page });
+      ids.push(...items.map((i) => i.id));
+      if (ids.length >= total || items.length === 0) break;
+    }
+    return { ok: true, ids };
+  } catch (error) {
+    unstable_rethrow(error);
+    console.error("[admin] Listing drafts failed:", (error as Error).name);
+    return { ok: false, error: "The drafts couldn't be listed right now. Try again." };
+  }
 }

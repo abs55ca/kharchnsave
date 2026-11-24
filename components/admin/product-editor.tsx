@@ -29,7 +29,7 @@ import type { AdminPhoto, EditableProduct, PublicationStatus } from "@/lib/admin
 import { onServerCopy, productFingerprint } from "@/lib/admin/product-sync";
 import { moveItem } from "@/lib/admin/reorder";
 import { CONDITION_LABELS, DEPARTMENTS, DEPARTMENT_ORDER, STYLE_LABELS } from "@/lib/catalog/labels";
-import { LIGHT_UP_CONDITIONS, lightUpDisclosure, type LightUpCondition } from "@/lib/catalog/light-up";
+import { LIGHT_UP_CONDITIONS, lightUpDisclosure } from "@/lib/catalog/light-up";
 import { saleBadgeText } from "@/lib/catalog/pricing";
 import { labelNameFor } from "@/lib/labels/name-fit";
 import { LabelPreview } from "./label-preview";
@@ -355,10 +355,8 @@ export function ProductEditor({ product, created = false, priceLock = null }: { 
             >
               <legend className="px-1 text-sm font-semibold">Light-up soles?</legend>
               <p id={`${fieldId("lightUp")}-hint`} className="text-xs text-muted">
-                {kids
-                  ? "Kids’ shoes: check whether the soles light up, and test both shoes before choosing “Both shoes work”."
-                  : "Only if the soles have lights."}{" "}
-                The shop shows a Light-up badge only when both shoes work.
+                {kids ? "Kids’ shoes: choose Yes only after checking that both shoes light up." : "Only if the soles have lights, and both shoes light up."}{" "}
+                The shop then shows a Light-up badge and says “{lightUpDisclosure({ condition: "both_work", activation: null }).text}”
               </p>
               <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-sm">
                 {(
@@ -374,7 +372,11 @@ export function ProductEditor({ product, created = false, priceLock = null }: { 
                       name="lightUp"
                       value={answer}
                       checked={values.lightUp === answer}
-                      onChange={() => set("lightUp", answer)}
+                      onChange={() => {
+                        set("lightUp", answer);
+                        // "Yes" means both shoes light up (the badge shows).
+                        if (answer === "yes") set("lightUpCondition", "both_work");
+                      }}
                       className="size-4 accent-forest"
                     />
                     {text}
@@ -384,55 +386,20 @@ export function ProductEditor({ product, created = false, priceLock = null }: { 
               {values.lightUp === "" ? (
                 <p className={HINT}>Not recorded yet: the shop says nothing about lights.</p>
               ) : null}
-              {values.lightUp === "yes" ? (
-                <div className="mt-3 grid gap-4 md:grid-cols-2">
-                  <div>
-                    <label htmlFor={fieldId("lightUpCondition")} className={LABEL}>
-                      Do the lights work?
-                    </label>
-                    <select
-                      id={fieldId("lightUpCondition")}
-                      name="lightUpCondition"
-                      value={values.lightUpCondition}
-                      onChange={(e) => set("lightUpCondition", e.target.value as LightUpCondition)}
-                      aria-invalid={errors.lightUpCondition ? true : undefined}
-                      aria-describedby={describedBy("lightUpCondition", true)}
-                      className={`${INPUT} h-11`}
-                    >
-                      {LIGHT_UP_CONDITIONS.map((c) => (
-                        <option key={c.value} value={c.value}>
-                          {c.label}
-                        </option>
-                      ))}
-                    </select>
-                    <p id={`${fieldId("lightUpCondition")}-hint`} className={HINT}>
-                      The shop says: “
-                      {lightUpDisclosure({ condition: values.lightUpCondition || "not_checked", activation: null }).text}”
-                    </p>
-                    {errorText("lightUpCondition")}
-                  </div>
-                  <div>
-                    <label htmlFor={fieldId("lightUpActivation")} className={LABEL}>
-                      How the lights activate <span className="font-normal text-muted">(optional)</span>
-                    </label>
-                    <input
-                      id={fieldId("lightUpActivation")}
-                      name="lightUpActivation"
-                      value={values.lightUpActivation}
-                      onChange={(e) => set("lightUpActivation", e.target.value)}
-                      maxLength={LIMITS.lightUpActivation}
-                      placeholder="e.g. Soles flash when walking."
-                      aria-invalid={errors.lightUpActivation ? true : undefined}
-                      aria-describedby={describedBy("lightUpActivation", true)}
-                      className={`${INPUT} h-11`}
-                    />
-                    <p id={`${fieldId("lightUpActivation")}-hint`} className={HINT}>
-                      Only what you’ve seen or the box says. Leave it empty if you’re not sure.
-                    </p>
-                    {errorText("lightUpActivation")}
-                  </div>
-                </div>
+              {/* No separate fields: "Yes" records "both shoes work". An answer recorded earlier
+                  (and any activation text) is kept unless the admin changes it. */}
+              <input type="hidden" name="lightUpCondition" value={values.lightUpCondition} />
+              <input type="hidden" name="lightUpActivation" value={values.lightUpActivation} />
+              {values.lightUp === "yes" && values.lightUpCondition !== "both_work" ? (
+                <p className={`${HINT} mt-2`}>
+                  Recorded earlier as “{LIGHT_UP_CONDITIONS.find((c) => c.value === values.lightUpCondition)?.label ?? values.lightUpCondition}”:
+                  the shop says “{lightUpDisclosure({ condition: values.lightUpCondition || "not_checked", activation: null }).text}”{" "}
+                  <button type="button" className="font-semibold text-forest underline" onClick={() => set("lightUpCondition", "both_work")}>
+                    Both shoes light up
+                  </button>
+                </p>
               ) : null}
+              {errorText("lightUpCondition")}
             </fieldset>
             <fieldset id={fieldId("styles")} className="md:col-span-2" aria-describedby={describedBy("styles", true)}>
               <legend className={LABEL}>Styles</legend>

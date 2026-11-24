@@ -3,6 +3,7 @@ import Link from "@/components/admin/admin-link";
 import { Suspense } from "react";
 import { AccessNotice } from "@/components/admin/access-notice";
 import { AdminNav } from "@/components/admin/admin-nav";
+import { BulkPublish, SelectDraft } from "@/components/admin/bulk-publish";
 import { PUBLICATION_LABELS, PublicationBadge } from "@/components/admin/publication-badge";
 import { RefreshOnReturn } from "@/components/admin/refresh-on-return";
 import { paisaToRupeesText } from "@/lib/admin/product-input";
@@ -141,9 +142,12 @@ async function ProductList({ searchParams }: Pick<PageProps<"/admin/products">, 
           {q || status ? "No products match. Try another search or filter." : "No products yet. Add your first one."}
         </p>
       ) : (
-        <ul className="mt-6 divide-y divide-line border-y border-line">
+        <BulkPublish draftIdsOnPage={items.filter((i) => i.status === "draft").map((i) => i.id)} q={q}>
+        <ul className="mt-3 divide-y divide-line border-y border-line">
           {items.map((item) => (
             <li key={item.id} className="relative flex items-center gap-4 py-3 hover:bg-cream/60">
+              {/* Only drafts can be published; the space keeps rows aligned. */}
+              {item.status === "draft" ? <SelectDraft id={item.id} label={`${item.itemCode} ${item.name}`} /> : <span className="size-5 shrink-0" aria-hidden="true" />}
               <div className="size-14 shrink-0 overflow-hidden rounded bg-cream">
                 {item.thumbnailSrc ? (
                   // Admin previews of private photos: never through next/image's shared cache.
@@ -186,6 +190,7 @@ async function ProductList({ searchParams }: Pick<PageProps<"/admin/products">, 
             </li>
           ))}
         </ul>
+        </BulkPublish>
       )}
 
       {pages > 1 ? (

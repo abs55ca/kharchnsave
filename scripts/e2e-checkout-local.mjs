@@ -15,7 +15,7 @@
 //     one whose secret always passes, one "already spent", one always failing.
 //     Only this local configuration sets CHECKOUT_TURNSTILE_TESTING_KEYS=allow.
 //   * e2e/checkout-local.spec.ts, e2e/referrals-local.spec.ts, e2e/pricing-local.spec.ts
-//     e2e/product-deletion-local.spec.ts, e2e/photo-order-local.spec.ts and e2e/promotions-local.spec.ts
+//     e2e/product-deletion-local.spec.ts, e2e/photo-order-local.spec.ts, e2e/promotions-local.spec.ts and e2e/size-sales-local.spec.ts
 //     in Playwright (E2E_SPECS=a,b runs only those files)
 //
 // It never reads .env.local's Supabase project: the build and servers get
@@ -158,7 +158,7 @@ try {
   }
   for (const port of Object.values(ports)) await waitFor(`http://127.0.0.1:${port}/order`);
 
-  await run(process.execPath, ["node_modules/@playwright/test/cli.js", "test", ...(process.env.E2E_SPECS ? process.env.E2E_SPECS.split(",") : ["e2e/checkout-local.spec.ts", "e2e/referrals-local.spec.ts", "e2e/pricing-local.spec.ts", "e2e/product-deletion-local.spec.ts", "e2e/photo-order-local.spec.ts", "e2e/promotions-local.spec.ts"])], {
+  await run(process.execPath, ["node_modules/@playwright/test/cli.js", "test", ...(process.env.E2E_SPECS ? process.env.E2E_SPECS.split(",") : ["e2e/checkout-local.spec.ts", "e2e/referrals-local.spec.ts", "e2e/pricing-local.spec.ts", "e2e/product-deletion-local.spec.ts", "e2e/photo-order-local.spec.ts", "e2e/promotions-local.spec.ts", "e2e/size-sales-local.spec.ts", "e2e/bulk-publish-local.spec.ts"])], {
     E2E_LOCAL_STACK: "1",
     E2E_BASE_URL: `http://127.0.0.1:${ports.pass}`,
     E2E_BASE_URL_SPENT: `http://127.0.0.1:${ports.spent}`,

@@ -8,6 +8,7 @@ import { getAdminClient, type AdminSessionClient } from "@/lib/auth/admin";
 import { UUID_PATTERN } from "@/lib/catalog/photos";
 import { CATALOGUE_TAG } from "@/lib/catalog/supabase-catalog";
 import { percentToBp } from "@/lib/pricing/rules";
+import type { DbSizeRule, SizeSalePlan } from "@/lib/pricing/size-sale-types";
 
 /*
  * Score pricing and sale campaign actions. Each is a public endpoint, so each
@@ -278,4 +279,59 @@ export async function runScheduleAction(_previous: PricingFormState, formData: F
   const a = answer as { started?: number; ended?: number; failed?: number; error?: string | null };
   if (a.failed) return { ok: false, done: true, message: `Ran with a problem: ${a.error ?? "see the schedule health"}.` };
   return { ok: true, done: true, message: `Done: ${a.started ?? 0} sale(s) started, ${a.ended ?? 0} ended.` };
+}
+
+// ---------------------------------------------------------------------------
+// Sales by size (supabase/migrations/20261124120000_size_sales.sql)
+// ---------------------------------------------------------------------------
+
+function sizeRulesInput(rules: unknown, defaultBp: unknown): { rules: DbSizeRule[]; defaultBp: number | null } | null {
+  if (!Array.isArray(rules) || rules.length > 50) return null;
+  const ok = rules.every((r) => r && typeof r === "object" && typeof r.from === "number" && typeof r.to === "number" && Number.isInteger(r.discount_bp));
+  if (!ok || !(defaultBp === null || Number.isInteger(defaultBp))) return null;
+  return { rules: rules.map((r) => ({ from: r.from, to: r.to, discount_bp: r.discount_bp })), defaultBp: defaultBp as number | null };
+}
+
+/** The products in a group with what the rules would do (the database decides; nothing changes). */
+export async function previewSizeSale(groupId: string, rules: unknown, defaultBp: unknown): Promise<PreviewAnswer<SizeSalePlan>> {
+  const input = sizeRulesInput(rules, defaultBp);
+  if (!UUID_PATTERN.test(groupId) || !input) return { ok: false, message: "Check the rules, then preview again." };
+  return preview<SizeSalePlan>("admin_preview_size_sale", { p_group_id: groupId, p_rules: input.rules, p_default_bp: input.defaultBp });
+}
+
+export async function applySizeSaleAction(_previous: PricingFormState, formData: FormData): Promise<PricingFormState> {
+  const requestId = text(formData, "requestId");
+  const groupId = text(formData, "groupId");
+  const token = text(formData, "token");
+  const defaultText = text(formData, "defaultBp");
+  const input = sizeRulesInput(json(formData, "rules"), defaultText === "" ? null : Number(defaultText));
+  if (!UUID_PATTERN.test(requestId) || !UUID_PATTERN.test(groupId) || !/^[0-9a-f]{64}$/.test(token) || !input) return OUT_OF_DATE;
+  const { state, answer } = await write("admin_apply_size_sale", {
+    p_request_id: requestId, p_group_id: groupId, p_rules: input.rules, p_default_bp: input.defaultBp, p_token: token,
+  }, "size sale");
+  if (state) return state;
+  const a = answer as { result?: string; applied?: number; with_was_price?: number; preview?: unknown; replayed?: boolean };
+  if (a.result === "stale") {
+    return { ok: false, done: true, data: a.preview, message: "Prices, products or sales changed since your preview, so nothing was applied. Check the new preview below and apply again." };
+  }
+  if (a.result === "nothing") {
+    refresh();
+    return { ok: false, done: true, message: "Nothing was applied: no product qualifies right now (see the reasons in the preview). The rules were saved." };
+  }
+  pricesChanged();
+  const message = `Applied to ${a.applied ?? 0} product(s). ${a.with_was_price ?? 0} show a verified "was" price; the rest show the sale price only.`;
+  return { ok: true, done: true, message: a.replayed ? `Already done earlier. ${message}` : message };
+}
+
+export async function endSizeSaleAction(_previous: PricingFormState, formData: FormData): Promise<PricingFormState> {
+  const requestId = text(formData, "requestId");
+  const groupId = text(formData, "groupId");
+  if (!UUID_PATTERN.test(requestId) || !UUID_PATTERN.test(groupId)) return OUT_OF_DATE;
+  const { state, answer } = await write("admin_end_size_sale", { p_request_id: requestId, p_group_id: groupId }, "end size sale");
+  if (state) return state;
+  const a = answer as { result?: string; removed?: number; changed?: number; replayed?: boolean };
+  if (a.result === "nothing") return { ok: true, done: true, message: "No size sale is running for this group." };
+  pricesChanged();
+  const message = `Size sale ended: ${a.removed ?? 0} product(s) back at their regular price.${a.changed ? ` ${a.changed} had a different price and were left as they are.` : ""}`;
+  return { ok: true, done: true, message: a.replayed ? `Already done earlier. ${message}` : message };
 }
