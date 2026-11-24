@@ -36,8 +36,9 @@ export function ProductCard({ product, eager = false }: { product: Product; eage
           style={image.focus ? { objectPosition: image.focus } : undefined}
         />
         <div className="absolute left-2 top-2 flex flex-wrap gap-1">
-          {/* New is the default, so only pre-loved shoes get a tag; the sale tag sits by the price. */}
-          {product.status === "preloved" ? <StatusBadge status={product.status} /> : null}
+          {/* A light "New" tag, a solid one for pre-loved; the sale tag sits by the price. */}
+          <StatusBadge status={product.status} soft />
+
           {showsLightUpBadge(product.lightUp) ? <LightUpBadge /> : null}
           {!inStock ? <SoldOutBadge /> : null}
         </div>
@@ -59,7 +60,7 @@ export function ProductCard({ product, eager = false }: { product: Product; eage
             {product.name}
           </Link>
         </h3>
-        {/* New is the default (no tag or label); pre-loved shoes show their condition. */}
+        {/* New shoes have the tag on the photo; pre-loved shoes also show their condition here. */}
         <p className="text-xs text-muted">
           Size: <span className="font-medium text-ink">{sizeLabel(product)}</span>
           {kidsAge ? (

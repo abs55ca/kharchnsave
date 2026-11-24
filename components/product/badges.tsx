@@ -3,16 +3,19 @@ import type { Condition, ItemStatus } from "@/lib/catalog/types";
 
 export function StatusBadge({
   status,
+  soft = false,
   className = "",
 }: {
   status: ItemStatus;
+  /** A lighter "New" (product cards), so it doesn't compete with the price. */
+  soft?: boolean;
   className?: string;
 }) {
+  const colours =
+    status === "new" ? (soft ? "bg-white/85 text-forest ring-1 ring-lime" : "bg-lime text-forest") : "bg-forest text-white";
   return (
     <span
-      className={`inline-flex items-center rounded-sm px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
-        status === "new" ? "bg-lime text-forest" : "bg-forest text-white"
-      } ${className}`}
+      className={`inline-flex items-center rounded-sm px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${colours} ${className}`}
     >
       {STATUS_LABELS[status]}
     </span>
