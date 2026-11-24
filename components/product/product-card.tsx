@@ -2,11 +2,10 @@ import Image from "next/image";
 import Link from "next/link";
 import { CONDITION_LABELS } from "@/lib/catalog/labels";
 import { showsLightUpBadge } from "@/lib/catalog/light-up";
-import { isOnSale, saleBadgeText } from "@/lib/catalog/pricing";
 import { isInStock, productHref, sizeLabel } from "@/lib/catalog/product-utils";
 import type { Product } from "@/lib/catalog/types";
 import { kidsAgeLabel } from "@/lib/sizes";
-import { LightUpBadge, SaleBadge, SoldOutBadge, StatusBadge } from "./badges";
+import { LightUpBadge, SoldOutBadge, StatusBadge } from "./badges";
 import { ProductPrice } from "./product-price";
 
 export const PRODUCT_GRID_SIZES =
@@ -37,8 +36,8 @@ export function ProductCard({ product, eager = false }: { product: Product; eage
           style={image.focus ? { objectPosition: image.focus } : undefined}
         />
         <div className="absolute left-2 top-2 flex flex-wrap gap-1">
-          <StatusBadge status={product.status} />
-          {isOnSale(product) ? <SaleBadge text={saleBadgeText(product.regularPrice!, product.price)} /> : null}
+          {/* New is the default, so only pre-loved shoes get a tag; the sale tag sits by the price. */}
+          {product.status === "preloved" ? <StatusBadge status={product.status} /> : null}
           {showsLightUpBadge(product.lightUp) ? <LightUpBadge /> : null}
           {!inStock ? <SoldOutBadge /> : null}
         </div>
@@ -50,18 +49,19 @@ export function ProductCard({ product, eager = false }: { product: Product; eage
             {product.brand}
           </p>
         ) : null}
-        <h3 className="font-sans text-sm font-medium leading-snug">
+        {/* One line, cut with "…" when too long (the full name shows on hover and to screen readers),
+            so sizes and prices line up across a row. */}
+        <h3 className="truncate font-sans text-sm font-medium leading-snug" title={product.name}>
           <Link
             href={productHref(product)}
             className="after:absolute after:inset-0 after:rounded-md hover:underline focus-visible:outline-none"
           >
-            {/* Keep the word before " — colour" attached so lines don't start with a dash. */}
-            {product.name.replace(" — ", " — ")}
+            {product.name}
           </Link>
         </h3>
-        {/* New shoes already carry the NEW badge on the photo; pre-loved ones show their condition. */}
+        {/* New is the default (no tag or label); pre-loved shoes show their condition. */}
         <p className="text-xs text-muted">
-          <span className="font-medium text-ink">{sizeLabel(product)}</span>
+          Size: <span className="font-medium text-ink">{sizeLabel(product)}</span>
           {kidsAge ? (
             <>
               <span aria-hidden="true"> · </span>
@@ -75,7 +75,7 @@ export function ProductCard({ product, eager = false }: { product: Product; eage
             </>
           )}
         </p>
-        <ProductPrice product={product} size="card" className="mt-1" />
+        <ProductPrice product={product} size="card" className="mt-1.5" />
       </div>
     </article>
   );
