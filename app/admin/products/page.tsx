@@ -66,6 +66,8 @@ async function ProductList({ searchParams }: Pick<PageProps<"/admin/products">, 
   }
   const { items, total } = result;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // Set by "Delete permanently" (components/admin/product-delete-panel.tsx); shown as text only.
+  const deleted = typeof params.deleted === "string" && /^[A-Z0-9]+(-[A-Z0-9]+)*$/.test(params.deleted) && params.deleted.length <= 40 ? params.deleted : null;
 
   return (
     <>
@@ -84,6 +86,12 @@ async function ProductList({ searchParams }: Pick<PageProps<"/admin/products">, 
           Add product
         </Link>
       </div>
+
+      {deleted ? (
+        <p role="status" className="mt-4 rounded-md border border-forest p-3 text-sm font-medium text-forest">
+          Deleted <span className="font-mono">{deleted}</span> permanently.
+        </p>
+      ) : null}
 
       <form role="search" action="/admin/products" className="mt-6 flex flex-wrap items-end gap-3">
         <div className="min-w-0 flex-1 sm:max-w-sm">

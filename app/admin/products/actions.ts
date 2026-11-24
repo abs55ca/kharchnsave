@@ -1,10 +1,10 @@
 "use server";
 
 import { randomUUID } from "node:crypto";
-import { updateTag } from "next/cache";
+import { refresh, updateTag } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
 import { recordUploadedPhoto } from "@/lib/admin/photo-registration";
-import { preparePhoto } from "@/lib/admin/photos";
+import { flipPhoto, preparePhoto, type PreparedPhoto } from "@/lib/admin/photos";
 import {
   LIMITS,
   publishProblems,
@@ -21,6 +21,7 @@ import {
   type EditableProduct,
   type PublicationStatus,
 } from "@/lib/admin/products";
+import { answerForDbError, type BlockedReason } from "@/lib/admin/request-outcome";
 import { getAdminClient, type AdminAccess, type AdminSessionClient } from "@/lib/auth/admin";
 import { photoCacheTag, photoObjectPath, PRODUCT_PHOTOS_BUCKET, UUID_PATTERN } from "@/lib/catalog/photos";
 import { fullName } from "@/lib/catalog/product-utils";
@@ -215,11 +216,26 @@ export async function uploadProductPhoto(formData: FormData): Promise<PhotoUploa
     return { ok: false, error: "The photo couldn’t be uploaded right now. Please try again." };
   }
 
+  return storeAndRecord(supabase, productId, version, prepared.photo, alt);
+}
+
+/**
+ * Stores a prepared photo at a new id and records it on the product (after the
+ * photos it already has). Shared by uploads and flips.
+ */
+async function storeAndRecord(
+  supabase: AdminSessionClient,
+  productId: string,
+  version: number,
+  photo: PreparedPhoto,
+  alt: string,
+  showsDefect = false,
+): Promise<PhotoUploadResult> {
   const imageId = randomUUID();
   const path = photoObjectPath(productId, imageId);
   const bucket = supabase.storage.from(PRODUCT_PHOTOS_BUCKET);
 
-  const { error: uploadError } = await bucket.upload(path, prepared.photo.data, {
+  const { error: uploadError } = await bucket.upload(path, photo.data, {
     contentType: "image/webp",
     upsert: false,
   });
@@ -239,8 +255,8 @@ export async function uploadProductPhoto(formData: FormData): Promise<PhotoUploa
         p_expected_version: version,
         p_image_id: imageId,
         p_storage_path: path,
-        p_width: prepared.photo.width,
-        p_height: prepared.photo.height,
+        p_width: photo.width,
+        p_height: photo.height,
         p_alt: alt,
       });
       return { data: typeof data === "number" ? data : null, error };
@@ -268,11 +284,66 @@ export async function uploadProductPhoto(formData: FormData): Promise<PhotoUploa
       id: imageId,
       previewSrc: adminPhotoSrc(productId, imageId),
       alt,
-      showsDefect: false,
-      width: prepared.photo.width,
-      height: prepared.photo.height,
+      showsDefect,
+      width: photo.width,
+      height: photo.height,
     },
   };
+}
+
+/**
+ * Mirrors an uploaded photo left to right. The mirrored copy is a new photo,
+ * stored and recorded like an upload (the original is untouched); the editor
+ * puts it in the original's place, so saving the product drops the original
+ * (and its file), exactly as if the admin had removed it.
+ */
+export async function flipProductPhoto(formData: FormData): Promise<PhotoUploadResult> {
+  const { access, supabase } = await getAdminClient();
+  if (!supabase) return { ok: false, error: accessMessage(access) };
+
+  const productId = readProductId(formData);
+  const version = readVersion(formData);
+  const imageId = formData.get("imageId");
+  if (!productId || version === null || typeof imageId !== "string" || !UUID_PATTERN.test(imageId)) {
+    return { ok: false, error: "This form is out of date. Reload the page." };
+  }
+
+  let original: AdminPhoto;
+  let stored: Uint8Array;
+  try {
+    const product = await getEditableProduct(supabase, productId);
+    if (!product) return { ok: false, error: "This product no longer exists. Go back to the product list." };
+    if (product.version !== version) return { ok: false, error: describeDbError({ code: "PT409" }).message, conflict: true };
+    const found = product.photos.find((p) => p.id === imageId);
+    if (!found) return { ok: false, error: "That photo is no longer on this product. Reload the page." };
+    original = found;
+    if (product.photos.length >= LIMITS.photos) {
+      return { ok: false, error: `The flipped copy needs a free photo slot (at most ${LIMITS.photos}). Remove a photo and save, then flip.` };
+    }
+    const { data: row, error } = await supabase
+      .from("product_images")
+      .select("storage_path")
+      .eq("id", imageId)
+      .eq("product_id", productId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!row?.storage_path) return { ok: false, error: "Only uploaded photos can be flipped." };
+    const { data: file, error: downloadError } = await supabase.storage.from(PRODUCT_PHOTOS_BUCKET).download(row.storage_path);
+    if (downloadError || !file) throw downloadError ?? new Error("no file");
+    stored = new Uint8Array(await file.arrayBuffer());
+  } catch (error) {
+    console.error("[admin] Photo flip: reading the photo failed:", (error as Error).name);
+    return { ok: false, error: "The photo couldn’t be flipped right now. Please try again." };
+  }
+
+  let flipped: PreparedPhoto;
+  try {
+    flipped = await flipPhoto(stored);
+  } catch (error) {
+    console.error("[admin] Photo flip failed:", (error as Error).name);
+    return { ok: false, error: "That photo couldn’t be flipped. Upload a mirrored copy instead." };
+  }
+  return storeAndRecord(supabase, productId, version, flipped, original.alt, original.showsDefect);
 }
 
 const TARGET_STATUSES: PublicationStatus[] = ["published", "draft", "archived"];
@@ -327,4 +398,95 @@ export async function changeProductStatus(formData: FormData): Promise<StatusCha
     console.error("[admin] Status change failed:", (error as Error).name);
     return { ok: false, error: "The status couldn’t be changed right now. Please try again." };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Permanent deletion (supabase/migrations/20261122150000_product_deletion.sql)
+// ---------------------------------------------------------------------------
+
+/** Shaped for useRequestAction (components/admin/agent-forms.tsx): one request id per deletion, retried unchanged when unconfirmed. */
+export type DeleteProductState = {
+  ok: boolean;
+  message: string | null;
+  done?: boolean;
+  uncertain?: boolean;
+  blocked?: BlockedReason;
+  /** Set once deleted: the product's item code (for the product list's notice). */
+  deletedItemCode?: string;
+};
+
+const DELETE_REFUSALS: Record<string, string> = {
+  confirm_mismatch: "Type the item code exactly as shown to confirm.",
+  delete_blocked: "Orders containing this product block the delete. Reload the page to see why.",
+  not_found: "This product no longer exists. It may have been deleted already: check the product list.",
+  request_mismatch: "This form was already used. Reload the page.",
+};
+
+/** Every file in the product's Storage folder: its photos, and any upload that was never recorded. */
+async function removeProductFolder(supabase: AdminSessionClient, productId: string, known: string[]) {
+  const paths = new Set(known);
+  const { data, error } = await supabase.storage.from(PRODUCT_PHOTOS_BUCKET).list(productId, { limit: 1000 });
+  if (error) console.error("[admin] Couldn't list a deleted product's photos:", error.name);
+  for (const file of data ?? []) paths.add(`${productId}/${file.name}`);
+  await removeStoredPhotos(supabase, productId, [...paths]);
+}
+
+export async function deleteProductAction(_previous: DeleteProductState, formData: FormData): Promise<DeleteProductState> {
+  const requestId = formData.get("requestId");
+  const productId = readProductId(formData);
+  const token = formData.get("token");
+  const confirm = formData.get("confirm");
+  if (typeof requestId !== "string" || !UUID_PATTERN.test(requestId) || !productId
+    || typeof token !== "string" || !/^[0-9a-f]{64}$/.test(token) || typeof confirm !== "string") {
+    return { ok: false, message: "This form is out of date. Reload the page." };
+  }
+  if (!confirm.trim()) return { ok: false, message: "Type the item code to confirm." };
+
+  const { access, supabase } = await getAdminClient();
+  if (!supabase) {
+    const blocked: BlockedReason =
+      access.status === "signed-out" ? "signed_out" : access.status === "unavailable" ? "unavailable" : "no_access";
+    return { ok: false, blocked, message: accessMessage(access) };
+  }
+
+  const { data, error } = await supabase.rpc("admin_delete_product", {
+    p_product_id: productId,
+    p_expected_token: token,
+    p_confirm_item_code: confirm.slice(0, 100),
+    p_request_id: requestId,
+  });
+  if (error) {
+    const answer = answerForDbError(error);
+    if (answer.uncertain) return { ok: false, uncertain: true, message: "No answer from the database." };
+    if (answer.blocked) return { ok: false, blocked: answer.blocked, message: "It couldn’t be checked right now." };
+    const known = error.hint ? DELETE_REFUSALS[error.hint] : undefined;
+    if (!known) console.error("[admin] Product deletion failed:", error.code);
+    return { ok: false, message: known ?? "The product couldn’t be deleted right now. Please try again." };
+  }
+
+  const result = data as { result: string; item_code?: string; orders_deleted?: string[]; storage_paths?: string[]; replayed?: boolean };
+  if (result.result === "stale") {
+    // The page reloads with the current list; the admin checks it and confirms again.
+    refresh();
+    return {
+      ok: false,
+      message: "Something changed since this page loaded (an edit, a new order or an order’s status), so nothing was deleted. Check the updated details and confirm again.",
+    };
+  }
+  if (result.result !== "deleted") {
+    console.error("[admin] Product deletion: unexpected answer.");
+    return { ok: false, uncertain: true, message: "Unexpected answer from the database." };
+  }
+
+  // Photos are private and no longer referenced; a file that can't be removed now stays private (logged).
+  await removeProductFolder(supabase, productId, result.storage_paths ?? []);
+  updateTag(CATALOGUE_TAG);
+  updateTag(photoCacheTag(productId));
+  const orders = result.orders_deleted?.length ?? 0;
+  return {
+    ok: true,
+    done: true,
+    deletedItemCode: result.item_code,
+    message: `${result.replayed ? "Already deleted earlier: " : "Deleted "}${result.item_code}${orders ? ` and ${orders} order${orders === 1 ? "" : "s"}` : ""}.`,
+  };
 }

@@ -112,7 +112,8 @@ async function Pricing({ searchParams }: Pick<PageProps<"/admin/pricing">, "sear
                 Currently prices end in {overview.settings.price_ending_rupees}
                 {overview.settings.min_profit_paisa !== null ? `; minimum profit ${formatPrice(overview.settings.min_profit_paisa / 100)}` : ""}
                 {overview.settings.min_margin_bp !== null ? `; minimum margin ${formatBp(overview.settings.min_margin_bp)}` : ""}. Sales:{" "}
-                <Link href="/admin/sales" className="font-semibold text-forest link-underline">coverage and campaigns</Link>.
+                <Link href="/admin/sales" className="font-semibold text-forest link-underline">coverage and campaigns</Link>. Discount proposals:{" "}
+                <Link href="/admin/pricing/promotions" className="font-semibold text-forest link-underline">promotion planner</Link>.
               </p>
               <SettingsForm settings={overview.settings} />
             </section>

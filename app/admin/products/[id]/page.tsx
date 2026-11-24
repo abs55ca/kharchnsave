@@ -4,12 +4,14 @@ import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { AccessNotice } from "@/components/admin/access-notice";
 import { AdminNav } from "@/components/admin/admin-nav";
+import { ProductDeletePanel } from "@/components/admin/product-delete-panel";
 import { ProductEditor } from "@/components/admin/product-editor";
 import { RefreshOnReturn } from "@/components/admin/refresh-on-return";
 import { RequestScope } from "@/components/admin/agent-forms";
 import { ProductPricingPanel } from "@/components/admin/pricing-forms";
 import { getProductPricing, type ProductPricing } from "@/lib/admin/pricing";
-import { getEditableProduct, type EditableProduct } from "@/lib/admin/products";
+import type { DeletionPreview } from "@/lib/admin/product-deletion";
+import { getDeletionPreview, getEditableProduct, type EditableProduct } from "@/lib/admin/products";
 import { getAdminPageClient } from "@/lib/auth/admin";
 import { UUID_PATTERN } from "@/lib/catalog/photos";
 
@@ -52,13 +54,14 @@ async function EditProduct({ params, searchParams }: PageProps<"/admin/products/
   }
   if (!product) notFound();
 
-  // Pricing is optional on this page: if it can't be read, the editor still works (without the panel).
+  // Both optional on this page: if one can't be read, the editor still works (without that panel).
   let pricing: ProductPricing | null = null;
-  try {
-    pricing = await getProductPricing(supabase, id);
-  } catch (error) {
-    console.error("[admin]", (error as Error).message);
-  }
+  let deletion: DeletionPreview | null = null;
+  const [pricingRead, deletionRead] = await Promise.allSettled([getProductPricing(supabase, id), getDeletionPreview(supabase, id)]);
+  if (pricingRead.status === "fulfilled") pricing = pricingRead.value;
+  else console.error("[admin]", (pricingRead.reason as Error).message);
+  if (deletionRead.status === "fulfilled") deletion = deletionRead.value;
+  else console.error("[admin]", (deletionRead.reason as Error).message);
   const priceLock = pricing?.mode === "auto"
     ? "Priced automatically from its score: change it in “Pricing” below, or switch it to a manual price there."
     : pricing?.campaign
@@ -82,6 +85,13 @@ async function EditProduct({ params, searchParams }: PageProps<"/admin/products/
         <div className="mt-10">
           <RequestScope>
             <ProductPricingPanel pricing={pricing} />
+          </RequestScope>
+        </div>
+      ) : null}
+      {deletion ? (
+        <div className="mt-10">
+          <RequestScope>
+            <ProductDeletePanel key={deletion.product.id} preview={deletion} />
           </RequestScope>
         </div>
       ) : null}

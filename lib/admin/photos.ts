@@ -93,6 +93,19 @@ export async function preparePhoto(file: unknown): Promise<{ ok: true; photo: Pr
 }
 
 /**
+ * A stored photo (already checked and re-encoded by preparePhoto) mirrored
+ * left to right, encoded like a new upload. Stored photos carry no rotation
+ * metadata, so the result is exactly the mirror of what admins see.
+ */
+export async function flipPhoto(stored: Uint8Array): Promise<PreparedPhoto> {
+  const { data, info } = await sharp(stored, { limitInputPixels: PHOTO_LIMITS.maxPixels, failOn: "warning" })
+    .flop()
+    .webp({ quality: PHOTO_LIMITS.storedQuality })
+    .toBuffer({ resolveWithObject: true });
+  return { data, width: info.width, height: info.height };
+}
+
+/**
  * A smaller WebP copy of a stored photo (already checked and re-encoded by
  * preparePhoto) for the admin previews, at most `maxSide` pixels on its
  * longest side. Made on request and never stored.

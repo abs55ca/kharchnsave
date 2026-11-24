@@ -213,6 +213,10 @@ Notes:
 | `supabase/migrations/20261121120000_score_pricing_and_sales.sql` | Score pricing (groups, scores, manual/automatic, price endings, costs, explicit giveaways), genuine price history and supported "was" prices, sale campaigns (one at a time, previews with tokens, schedule job), and clearance referral exclusion in checkout quotes (see [Score pricing and sales](#score-pricing-and-sales)) |
 | `supabase/setup/schedule_sale_campaigns.sql` | Optional, after the migration: pg_cron job that starts and ends scheduled sales every minute |
 | `db-tests/pricing.test.ts`, `db-tests/sale-schedule-script.test.ts` | Tests for the pricing migration and the schedule script on real PostgreSQL |
+| `supabase/migrations/20261122150000_product_deletion.sql` | Permanent product deletion with every order containing it: preview with a token, typed confirmation, refusals for unfinished orders, refunds due and paid-out commission, a deletion log; the append-only guards let only this function delete (see [Deleting a product permanently](#deleting-a-product-permanently)) |
+| `supabase/migrations/20261123120000_promotion_planner.sql` | Promotion planner (admin only): a discount percentage per product and the regular price it implies from the selling price, stored apart from prices and history; never shown to shoppers (see [Promotion planner](#promotion-planner)) |
+| `db-tests/promotions.test.ts` | Tests for that migration: access, proposals worked out by the database, stable percentages, and no change to prices, history, quotes or orders |
+| `db-tests/product-deletion.test.ts` | Tests for that migration on real PostgreSQL (permissions, what is deleted and kept, refusals, stale previews, retries, a race with checkout, the guards outside a deletion) |
 | `supabase/tests/item_codes_sale_prices_test.sql` | Tests for code assignment and collisions, existing codes, the sale price rules, quotes, free delivery, orders and in-store sales at sale prices, and historical orders. Rolls back and puts its counters back |
 | `supabase/tests/label_names_light_up_test.sql` | Tests for the label name and light-up rules, who can read the label name, and that saving them leaves stock, held pairs, inventory versions and the ledger alone. Rolls back |
 | `supabase/tests/orders_test.sql` | Tests for order permissions, the gateway secret, checkout, retries, hold expiry, admin actions, delivery and payment, returns, in-store sales, stale stock edits and ledger reconciliation. Rolls back |
@@ -496,9 +500,10 @@ recovery (admin MFA API) and the session-expiry and membership-removal checks ab
 ## Product management
 
 Verified admins (membership **and** two-step verification) manage the catalogue at
-`/admin/products`. Nothing here deletes a product, and nothing uses a secret key: every
-read and write goes through the admin's own session with the publishable key, so the
-database checks the same rules again.
+`/admin/products`. Nothing uses a secret key: every read and write goes through the admin's
+own session with the publishable key, so the database checks the same rules again. Products
+are normally archived; deleting one for good is a separate, guarded step (see
+[Deleting a product permanently](#deleting-a-product-permanently)).
 
 ### What admins can do
 
@@ -509,12 +514,16 @@ database checks the same rules again.
   description, price in rupees, item code, web address name (suggested from the brand and
   name if left empty) and sizes with stock. It's saved as a **draft**. Photos are added on
   the next screen, once the product exists.
-- **Edit a product:** the same fields, plus photos: upload, reorder (**Earlier** /
-  **Later**; the first is the main photo), describe each one for screen readers, tick
-  **Shows wear or a flaw** for defect close-ups, and **Remove** from the listing.
+- **Edit a product:** the same fields, plus photos: upload, reorder (drag a photo;
+  on a phone, drag its ⠿ handle; or **Earlier** / **Later**; the first is the main photo), describe each one for screen readers, tick
+  **Shows wear or a flaw** for defect close-ups, **Flip** an uploaded photo left to right (a mirrored copy
+  takes its place; the original is removed when you save), and **Remove** from the listing.
   **Save changes** saves the details, sizes and photo details together, all or nothing.
 - **Status:** **Publish**, **Unpublish** (back to draft), **Archive**, and **Restore as
   draft** for archived products. These are disabled while there are unsaved changes.
+- **Delete permanently** (bottom of the edit page): removes the product **and every order
+  containing it**, after typing its item code. See
+  [Deleting a product permanently](#deleting-a-product-permanently).
 - **Feedback:** each field shows its own error, with a summary at the top linking to the
   fields; the bar at the bottom shows "You have unsaved changes", "Saving…" or "Saved.".
   Leaving with unsaved changes (a link, closing or reloading the tab) asks first. The
@@ -537,9 +546,85 @@ The server checks these first, for clear messages, and the database enforces the
 | Item codes | **Automatically generate item code** (ticked by default on Add Product) has the database assign `ITEM-000001`, `ITEM-000002`, … when the draft is created, from its own sequence (never the barcode sequence, a row count or MAX + 1); a number some product already uses is skipped. Typed codes can't take that form. Once assigned, the code behaves like any other: kept on every save, fixed once published. Untick the box to type a code |
 | Identifiers | The product ID never changes. Item codes, web addresses and SKUs are unique. SKUs are made automatically as `<item code>-<size>` (e.g. `PL-M-1001-42.5`). Once a product has been published, its item code, SKUs and sizes are fixed and its sizes can't be removed (set stock to 0), so an SKU is never reused. Changing a published product's web address is allowed but breaks links people already have |
 | Conflicts | Every product has a version number. A save names the version it started from; if someone else saved in between, it's refused ("Someone else saved this product…") instead of overwriting their work. Photo uploads and status changes work the same way |
-| No deletion | Products are archived, never deleted, through the website or the API |
+| Deletion | Archive to hide a product. **Delete permanently** is the only way to delete one; it also deletes every order containing it, and is refused while any of those orders is unfinished (see [Deleting a product permanently](#deleting-a-product-permanently)). Nothing else deletes products, through the website or the API |
 | Label name | Optional, for printed labels only (see [Printing labels](#printing-labels)). A label name that's typed or changed must fit the label; a product name too wide for the label doesn't block saving other changes, it blocks printing |
 | Light-up soles | **Yes**, **No** or **Not recorded** (every product until someone checks; never assumed to be No). Yes needs a condition: Not checked, Both shoes work, One shoe works or Neither works, and may have a short description of how the lights activate, in the admin's own words. The shop shows a **Light-up** badge (product cards and page) only for Both shoes work; the product page states any other condition ("Lights not tested", "only one shoe", "don't work"). Editing these never changes stock |
+
+### Deleting a product permanently
+
+**Delete permanently**, at the bottom of a product's edit page, deletes the product from the shop
+and the database for good, **together with every order that contains it**. Archive instead if
+the product only needs to disappear from the shop.
+
+**What the admin sees first.** The panel lists the product's sizes and photos and every order
+containing it: number (linking to the order), status, total, date, the order's other products
+(their lines go too, because the whole order is deleted), whether it has a referral, and anything
+that blocks the delete. The button stays disabled until the item code is typed (any case), and a
+final browser confirmation names the orders.
+
+**Refused (nothing deleted) while any of those orders:**
+
+| Blocker | Why | What to do |
+| --- | --- | --- |
+| Isn't finished: waiting for confirmation, confirmed, with the courier, or delivery failed | Its pairs are still held or in transit | Deliver, return or cancel it first. Delivered, returned, cancelled and in-store orders count as finished |
+| Has a refund due | Money is still owed to the customer | Record the refund first |
+| Agent commission paid out, or adjusted after a payout | Those are records of money that has moved; deleting them would corrupt the payout | Archive the product instead |
+
+It is also refused, with the updated list shown, if anything changed after the page loaded: an
+edit to the product, a new order, or a change to one of those orders (the page's preview carries a
+token for exactly that state). A checkout that races the delete either gets its order in first
+(then the delete is refused as changed) or finds the product gone.
+
+**Deleted:** the product, its sizes, photo records, pricing settings, sale-campaign entries,
+reference price and price history, its own stock-ledger rows, the photo files in Storage, and
+each order containing it with all of that order's lines, events, returns, referral snapshot and
+commission holds. The customer's private order link stops working.
+
+**Kept:** other products' stock-ledger rows from those orders, so their stock history still adds
+up (the link to the deleted order is removed); the product's barcodes, retired, so a printed
+label is still recognised and a barcode is never issued twice; pricing request records (they can
+cover several products); and one row in `private.product_deletions` with who deleted which item
+code and name, when, and the order numbers deleted (no customer details).
+
+**How it's enforced** (`20261122150000_product_deletion.sql`): `public.admin_delete_product`
+requires a verified admin (membership and two-step verification), locks the product, its sizes
+and the orders, checks the token and the blockers again, then deletes everything in one
+transaction. Orders, order lines, events, returns, referral records and the stock ledger are
+append-only by design; their guards allow a delete only while that function runs (the setting
+`kns.product_purge`, for its own transaction). Every other delete is still refused, even by the
+database owner. A retry after a lost answer is recognised by its request id and gets the original
+answer. Photo files that can't be removed (Storage unavailable) stay private and unreferenced,
+and the failure is logged.
+
+**Setup (owner).** Nothing here is applied to a hosted project yet.
+1. Apply `20261122150000_product_deletion.sql` in the SQL Editor (one transaction). It needs
+   every earlier migration, through `20261122134446_pricing_review_guards.sql`.
+2. Deploy this version of the site.
+
+| Code | Database | What happens |
+| --- | --- | --- |
+| This version | without the migration | Everything else works; the edit page leaves out the delete panel (its read fails and is logged) |
+| Previous version | with it | Works; it has no delete panel. Orders and the stock ledger behave exactly as before |
+| This version | with it | Everything works |
+
+**Verification** (read-only; after step 1):
+```sql
+select
+  to_regprocedure('public.admin_delete_product(uuid, text, text, uuid)') is not null as installed,
+  has_function_privilege('anon', 'public.admin_delete_product(uuid, text, text, uuid)', 'EXECUTE') as anon_can_call,        -- false
+  has_function_privilege('authenticated', 'public.admin_delete_product(uuid, text, text, uuid)', 'EXECUTE') as signed_in_can_call, -- true (the function itself requires a verified admin)
+  has_table_privilege('authenticated', 'private.product_deletions', 'SELECT') as signed_in_reads_log;                        -- false
+```
+Then, on dev, as a verified admin: open a test product that is in a cancelled order, check the
+panel lists that order, type the item code and delete; check the product list shows "Deleted …",
+the order is gone from Orders, and the photos are gone from Storage (`product-photos/<product id>/`).
+A direct `delete from public.orders …` in the SQL Editor must still fail ("Orders are never deleted.").
+
+**Verification status.** *Measured, local:* `db-tests/product-deletion.test.ts` (12 tests, real
+PostgreSQL with every migration; orders taken through the real admin functions) and
+`e2e/product-deletion-local.spec.ts` (2 tests, phone viewport, local stack). *Not verified:*
+PostgREST, Storage file removal (the local tests' products use site images, not uploads), and the admin product
+list's "Deleted" notice (the stand-in can't render that page); all need a real Supabase project.
 
 ### Product photos
 
@@ -1504,7 +1589,7 @@ earlier `admin_save_product`; prefer switching off and fixing forward.
 | `npm test` | Unit tests, including checkout input, keys, Turnstile, configuration, retries and the order flow with fakes | nothing |
 | `npm run test:db` | Every migration and every `supabase/tests/*.sql` file on **real PostgreSQL** (fresh database, and existing data first), plus races with many simultaneous connections (`db-tests/concurrency.test.ts`) | nothing: it starts a throwaway local PostgreSQL server (the `embedded-postgres` package, no Docker); or set `DB_TESTS_URL` (localhost only) and `ALLOW_DB_TESTS=1` |
 | `npx playwright test e2e/checkout.spec.ts` | Checkout while it is off: closed APIs, the order page, admin access | a running build |
-| `npm run test:e2e:checkout` | **The real checkout UI and Server Action through to stored orders and stock** (`e2e/checkout-local.spec.ts`): a successful order and its private page; a double click and two tabs at once; a lost response, then retry and refresh; changed details under the same key; spent and failing bot checks; abandoning a key before and after its order commits. Also the sales-agent flows (`e2e/referrals-local.spec.ts`) and score pricing and sales (`e2e/pricing-local.spec.ts`). `E2E_SPECS=e2e/pricing-local.spec.ts` runs only the files named | internet access (Turnstile). It starts a throwaway PostgreSQL with every migration, a minimal stand-in for Supabase's HTTP API (`e2e/local-stack/postgrest-shim.mjs`, **not** PostgREST, Auth or Storage), a build in `.next-e2e` and three servers using Cloudflare's Turnstile **testing** keys |
+| `npm run test:e2e:checkout` | **The real checkout UI and Server Action through to stored orders and stock** (`e2e/checkout-local.spec.ts`): a successful order and its private page; a double click and two tabs at once; a lost response, then retry and refresh; changed details under the same key; spent and failing bot checks; abandoning a key before and after its order commits. Also the sales-agent flows (`e2e/referrals-local.spec.ts`), score pricing and sales (`e2e/pricing-local.spec.ts`), permanent product deletion (`e2e/product-deletion-local.spec.ts`), and dragging photos into order and flipping an uploaded one (`e2e/photo-order-local.spec.ts`, mouse and touch). `E2E_SPECS=e2e/pricing-local.spec.ts` runs only the files named | internet access (Turnstile). It starts a throwaway PostgreSQL with every migration, a minimal stand-in for Supabase's HTTP API (`e2e/local-stack/postgrest-shim.mjs`, **not** PostgREST, Auth or Storage; it keeps product photos in memory with the bucket's access rules), a build in `.next-e2e` and three servers using Cloudflare's Turnstile **testing** keys |
 
 The races cover: 20 buyers for one pre-loved pair (exactly one order); 8 buyers for 5
 pairs; carts with the same sizes in opposite order; an online order against an in-store
@@ -1654,7 +1739,10 @@ Payouts are recorded manually after paying the agent outside the app
 A request id makes retries safe; the same id with different details is refused. Each
 commission and adjustment can be paid only once (unique constraints). A payout locks the agent,
 then the orders, so a return and a payout of the same order happen one after the other. Payouts,
-their lines, adjustments, referral snapshots and the agent change log are append-only.
+their lines, adjustments, referral snapshots and the agent change log are append-only. (The one
+exception: [deleting a product permanently](#deleting-a-product-permanently) deletes the orders
+containing it, with their referral snapshots and holds. It is refused for any order whose
+commission was paid out or adjusted, so payouts and adjustments are never touched.)
 
 Manual adjustments need a reason (5-300 characters) and record who made them and when.
 
@@ -2025,6 +2113,44 @@ assignment (no category system); the giveaway needs automatic pricing with score
 can't be renamed or groups deleted yet; margin checks use per-unit estimates (an order's
 discount and commission are rounded once per order and can differ by a paisa); scheduled times
 are entered in Pakistan time (UTC+5).
+
+### Promotion planner
+
+`/admin/pricing/promotions` (linked from **Pricing**) plans discount percentages for the catalogue
+without changing a single price. For every priced draft or published product it shows: product,
+score, current selling price, assigned percentage, **proposed regular price**, the actual saving,
+and whether that proposed price passes the reference-price check.
+
+- **Percentages:** 20, 25, 30 or 35%. The target shares are 20% of products at 20%, 35% at 25%,
+  30% at 30% and 15% at 35% ([`lib/promotions/plan.ts`](lib/promotions/plan.ts)).
+- **Who gets what:** with reliable age and sales data (80% of products listed 60+ days and 30+
+  pairs sold), older and slower stock gets the larger discounts. Otherwise the assignment is seeded
+  randomness: models are ordered by a hash of a fixed seed and their smallest product id. Never by
+  size, price or score.
+- **Stable:** **Save assignments** stores them in `private.promotion_assignments`. A saved
+  percentage never changes. Every listing of a model (same brand and name, i.e. its other sizes)
+  shares one percentage, including sizes added later.
+- **Proposed regular price** = selling price ÷ (1 − discount), to the paisa (half up), worked out
+  by the database. The page shows the true saving, and its percentage worked out at full
+  precision from the stored prices, then rounded (half up, not truncated) to two decimals
+  (Rs. 3,795 at 35% → Rs. 5,838.46, a saving of Rs. 2,043.46: 34.99998…% → **35.00%**;
+  Rs. 2,995 from Rs. 4,278.57 → **30.00%**). If a selling price changes, the
+  proposal is marked out of date. **Refresh proposals** recalculates it at the same percentage.
+- **What it never touches:** selling prices, sale prices, the scoring formula, price history,
+  checkout quotes, orders and payments (`db-tests/promotions.test.ts`,
+  `e2e/promotions-local.spec.ts`).
+- **What shoppers see:** nothing from the planner. A crossed-out price appears only during a sale,
+  set by the database from the product's genuine price history, and is labelled **Was**. The
+  planner's last column runs that same check (`private.reference_candidate`) on each proposal.
+  Until the product has really been offered at that price, it says "Proposal only". No MSRP or
+  other reference price is on record.
+
+**Status (2026-11-23).** Implemented and tested locally only (unit, database and browser tests
+on a local stand-in). The migration has **not** been applied to any hosted Supabase project, and
+the site version with the planner has **not** been deployed, so it isn't live anywhere yet.
+
+**Setup (owner).** Apply `20261123120000_promotion_planner.sql` (needs every earlier migration),
+then deploy. Without the migration, only the planner page fails to load; everything else works.
 
 ## Enabling online payments
 

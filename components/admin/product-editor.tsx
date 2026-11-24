@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "@/components/admin/admin-link";
-import { useActionState, useId, useMemo, useRef, useState, useTransition } from "react";
+import { useActionState, useEffect, useId, useMemo, useRef, useState, useTransition } from "react";
 import {
   changeProductStatus,
   createProduct,
+  flipProductPhoto,
   saveProduct,
   uploadProductPhoto,
   type ProductFormState,
@@ -26,6 +27,7 @@ import {
 } from "@/lib/admin/product-input";
 import type { AdminPhoto, EditableProduct, PublicationStatus } from "@/lib/admin/products";
 import { onServerCopy, productFingerprint } from "@/lib/admin/product-sync";
+import { moveItem } from "@/lib/admin/reorder";
 import { CONDITION_LABELS, DEPARTMENTS, DEPARTMENT_ORDER, STYLE_LABELS } from "@/lib/catalog/labels";
 import { LIGHT_UP_CONDITIONS, lightUpDisclosure, type LightUpCondition } from "@/lib/catalog/light-up";
 import { saleBadgeText } from "@/lib/catalog/pricing";
@@ -718,6 +720,13 @@ export function ProductEditor({ product, created = false, priceLock = null }: { 
               setPhotos((current) => [...current, photo]);
               setSaved((current) => ({ ...current, photos: [...current.photos, photo] }));
             }}
+            onFlipped={(originalId, photo, newVersion) => {
+              // The mirrored copy is recorded (after the saved photos); here it takes the original's
+              // place, with the details typed since. Saving drops the original.
+              setVersion(newVersion);
+              setPhotos((current) => current.map((p) => (p.id === originalId ? { ...photo, alt: p.alt, showsDefect: p.showsDefect } : p)));
+              setSaved((current) => ({ ...current, photos: [...current.photos, photo] }));
+            }}
           />
         ) : (
           <Section title="Photos">
@@ -961,6 +970,7 @@ function PhotosEditor({
   error,
   onChange,
   onUploaded,
+  onFlipped,
 }: {
   id: string;
   productId: string;
@@ -969,15 +979,131 @@ function PhotosEditor({
   error?: string;
   onChange: (photos: AdminPhoto[]) => void;
   onUploaded: (photo: AdminPhoto, version: number) => void;
+  onFlipped: (originalId: string, photo: AdminPhoto, version: number) => void;
 }) {
   const [uploading, startUpload] = useTransition();
+  const [flipping, startFlip] = useTransition();
+  const [flippingId, setFlippingId] = useState<string | null>(null);
   const [uploadMessage, setUploadMessage] = useState<{ error: boolean; text: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const move = (index: number, by: -1 | 1) => {
-    const next = [...photos];
-    [next[index], next[index + by]] = [next[index + by], next[index]];
-    onChange(next);
+  const move = (index: number, by: -1 | 1) => onChange(moveItem(photos, index, index + by));
+
+  /*
+   * Drag to reorder (pointer events, so mouse, pen and touch all work). A
+   * mouse or pen can drag a photo from anywhere on it; a finger only from its
+   * ⠿ handle, so swiping across the photos still scrolls the page. The order
+   * changes live as the photo passes over another one; Escape puts it back.
+   * Earlier / Later stay for keyboards and screen readers. Like them, the new
+   * order is kept when the product is saved.
+   */
+  // The drag listens on the window (the photo's element moves in the page as the order changes),
+  // so it reads the current photos through this ref.
+  const latest = useRef({ photos, onChange });
+  useEffect(() => {
+    latest.current = { photos, onChange };
+  });
+  const cards = useRef(new Map<string, HTMLLIElement>());
+  const drag = useRef<{ id: string; x: number; y: number; active: boolean; original: AdminPhoto[]; stop: () => void } | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  useEffect(() => () => drag.current?.stop(), []);
+
+  const finishDrag = (cancelled: boolean) => {
+    const d = drag.current;
+    if (!d) return;
+    d.stop();
+    drag.current = null;
+    setDraggingId(null);
+    if (!d.active) return;
+    const { photos: now, onChange: change } = latest.current;
+    if (cancelled) {
+      change(d.original);
+      setAnnouncement("Move cancelled.");
+      return;
+    }
+    const at = now.findIndex((p) => p.id === d.id);
+    setAnnouncement(at === 0 ? "Moved: it is now the main photo." : `Moved to position ${at + 1} of ${now.length}.`);
+  };
+
+  const dragTo = (x: number, y: number) => {
+    const d = drag.current;
+    if (!d) return;
+    if (!d.active) {
+      // A small movement first, so a plain click isn't a drag.
+      if (Math.hypot(x - d.x, y - d.y) < 6) return;
+      d.active = true;
+      setDraggingId(d.id);
+      setAnnouncement("");
+    }
+    // Near the top or bottom of the window: scroll, so a photo can travel the whole list on a phone.
+    const edge = 72;
+    if (y < edge) window.scrollBy(0, -16);
+    else if (y > window.innerHeight - edge) window.scrollBy(0, 16);
+    const { photos: now, onChange: change } = latest.current;
+    const target = now.findIndex((p) => {
+      const rect = cards.current.get(p.id)?.getBoundingClientRect();
+      return rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    });
+    const from = now.findIndex((p) => p.id === d.id);
+    if (target >= 0 && from >= 0 && target !== from) change(moveItem(now, from, target));
+  };
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>, photo: AdminPhoto) => {
+    if (e.button !== 0 || drag.current || photos.length < 2) return;
+    if (e.pointerType === "touch" && !(e.target as Element).closest("[data-drag-handle]")) return;
+    e.preventDefault(); // no text selection or native image drag
+    const pointerId = e.pointerId;
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId === pointerId) dragTo(ev.clientX, ev.clientY);
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId === pointerId) finishDrag(false);
+    };
+    const onCancel = (ev: PointerEvent) => {
+      if (ev.pointerId === pointerId) finishDrag(true);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault();
+      finishDrag(true);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("keydown", onKey);
+    drag.current = {
+      id: photo.id,
+      x: e.clientX,
+      y: e.clientY,
+      active: false,
+      original: photos,
+      stop: () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onCancel);
+        window.removeEventListener("keydown", onKey);
+      },
+    };
+  };
+  // Mirrors an uploaded photo (a new copy replaces it here; the original goes when the product is saved).
+  const flip = (photo: AdminPhoto, index: number) => {
+    setUploadMessage(null);
+    setFlippingId(photo.id);
+    startFlip(async () => {
+      const formData = new FormData();
+      formData.set("productId", productId);
+      formData.set("version", String(version));
+      formData.set("imageId", photo.id);
+      const result = await flipProductPhoto(formData);
+      setFlippingId(null);
+      if (!result.ok) {
+        setUploadMessage({ error: true, text: `Photo ${index + 1}: ${result.error}` });
+        return;
+      }
+      onFlipped(photo.id, result.photo, result.version);
+      setUploadMessage({ error: false, text: `Photo ${index + 1} flipped. Save to keep it (the unflipped one is removed then).` });
+    });
   };
   const update = (index: number, change: Partial<AdminPhoto>) =>
     onChange(photos.map((p, i) => (i === index ? { ...p, ...change } : p)));
@@ -1023,19 +1149,48 @@ function PhotosEditor({
         <p className={HINT}>
           The first photo is the main one. JPEG, PNG or WebP, up to 4 MB, at least 400 pixels on each side. Photos are
           private until the product is published.
+          {photos.length > 1 ? " Drag a photo to change the order (on a phone, drag its ⠿ handle), or use Earlier and Later." : ""}
+        </p>
+        <p aria-live="polite" className="sr-only">
+          {announcement}
         </p>
 
         {photos.length > 0 ? (
           <ol className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {photos.map((photo, index) => (
-              <li key={photo.id} className="rounded-md border border-line p-3">
-                <div className="relative aspect-square overflow-hidden rounded bg-cream">
+              <li
+                key={photo.id}
+                ref={(el) => {
+                  if (el) cards.current.set(photo.id, el);
+                  else cards.current.delete(photo.id);
+                }}
+                className={`rounded-md border p-3 transition-shadow ${
+                  draggingId === photo.id ? "relative z-10 border-forest shadow-lg ring-2 ring-forest" : "border-line"
+                }`}
+              >
+                <div
+                  className={`relative aspect-square select-none overflow-hidden rounded bg-cream ${
+                    photos.length > 1 ? (draggingId === photo.id ? "cursor-grabbing" : "cursor-grab") : ""
+                  } ${draggingId === photo.id ? "opacity-80" : ""}`}
+                  onPointerDown={(e) => onPointerDown(e, photo)}
+                >
                   {/* Private previews come from a signed-in route; next/image would cache them in a shared cache. */}
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={photo.previewSrc} alt="" className="size-full object-cover" />
+                  <img src={photo.previewSrc} alt="" draggable={false} className="pointer-events-none size-full object-cover" />
                   <span className="absolute left-2 top-2 rounded bg-white/90 px-1.5 py-0.5 text-xs font-semibold">
                     {index === 0 ? "Main photo" : `Photo ${index + 1}`}
                   </span>
+                  {photos.length > 1 ? (
+                    // Touch drags start here only; keyboards use Earlier / Later.
+                    <span
+                      data-drag-handle
+                      aria-hidden="true"
+                      title="Drag to reorder"
+                      className="absolute right-1 top-1 flex size-11 touch-none items-center justify-center rounded bg-white/90 text-xl leading-none text-ink shadow-sm"
+                    >
+                      ⠿
+                    </span>
+                  ) : null}
                 </div>
                 <label htmlFor={`${id}-alt-${photo.id}`} className="mt-3 mb-1 block text-xs font-semibold">
                   Description for screen readers
@@ -1074,6 +1229,19 @@ function PhotosEditor({
                   <button type="button" onClick={() => move(index, 1)} disabled={index === photos.length - 1} className="btn btn-outline h-8 px-2 text-xs disabled:opacity-50" aria-label={`Move photo ${index + 1} later`}>
                     Later
                   </button>
+                  {/* Uploaded photos only: site images have no stored file to mirror. */}
+                  {photo.previewSrc.startsWith("/admin/") ? (
+                    <button
+                      type="button"
+                      onClick={() => flip(photo, index)}
+                      disabled={uploading || flipping || photos.length >= LIMITS.photos}
+                      className="btn btn-outline h-8 px-2 text-xs disabled:opacity-50"
+                      aria-label={`Flip photo ${index + 1} left to right`}
+                      title={photos.length >= LIMITS.photos ? `Flipping needs a free photo slot (at most ${LIMITS.photos})` : "Mirror this photo left to right"}
+                    >
+                      {flippingId === photo.id ? "Flipping…" : "Flip"}
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     onClick={() => onChange(photos.filter((_, i) => i !== index))}
@@ -1100,19 +1268,20 @@ function PhotosEditor({
             type="file"
             accept={PHOTO_UPLOAD.accept}
             multiple
-            disabled={uploading || photos.length >= LIMITS.photos}
+            disabled={uploading || flipping || photos.length >= LIMITS.photos}
             onChange={(e) => upload(e.target.files)}
             className="block text-sm file:mr-3 file:rounded-md file:border-0 file:bg-forest file:px-3 file:py-2 file:font-semibold file:text-white"
           />
           <p aria-live="polite" className="mt-2 text-sm">
-            {uploading ? (
-              <span className="text-muted">Uploading…</span>
+            {uploading || flipping ? (
+              <span className="text-muted">{uploading ? "Uploading…" : "Flipping…"}</span>
             ) : uploadMessage ? (
               <span className={uploadMessage.error ? "font-medium text-danger" : "text-forest"}>{uploadMessage.text}</span>
             ) : null}
           </p>
           <p className={HINT}>
-            Uploaded photos are kept straight away. Removing one takes effect when you save.
+            Uploaded photos are kept straight away. Removing one takes effect when you save. Flip mirrors a photo left
+            to right; the unflipped one is removed when you save.
           </p>
         </div>
         {error ? <p className={ERROR}>{error}</p> : null}

@@ -1,4 +1,5 @@
 import "server-only";
+import type { DeletionPreview } from "@/lib/admin/product-deletion";
 import type { AdminSessionClient } from "@/lib/auth/admin";
 import { UUID_PATTERN } from "@/lib/catalog/photos";
 import type { LightUpCondition } from "@/lib/catalog/light-up";
@@ -388,4 +389,13 @@ export function describeDbError(error: DbError): DbProblem {
     }
   }
   return { kind: "general", message: "The product couldn’t be saved. Check the details and try again." };
+}
+
+/** What deleting this product would remove (public.admin_product_deletion_preview); null if it doesn't exist. */
+export async function getDeletionPreview(supabase: AdminSessionClient, productId: string): Promise<DeletionPreview | null> {
+  const { data, error } = await supabase
+    .rpc("admin_product_deletion_preview", { p_product_id: productId })
+    .abortSignal(readTimeout());
+  if (error) throw new Error(`admin_product_deletion_preview failed (${error.code || "no code"}).`);
+  return (data as DeletionPreview | null) ?? null;
 }

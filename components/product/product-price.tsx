@@ -5,7 +5,7 @@ import { formatPrice } from "@/lib/format";
 /**
  * A product's price. With a supported "was" price (Product.regularPrice, from
  * genuine price history): the price customers pay first and prominent, then
- * the was-price, smaller, muted and struck through in red, and on the product
+ * "Was" and the was-price (smaller, muted, struck through in red), and on the product
  * page the saving in rupees and percent (rounded down). Screen readers hear
  * "Sale price" and "Was" (a strikethrough alone isn't read out). Otherwise —
  * not on sale, or on sale without a supported reference — just the price.
@@ -28,9 +28,10 @@ export function ProductPrice({
         <span className="sr-only">Sale price: </span>
         {formatPrice(product.price)}
       </span>
+      {/* Labelled for everyone: the comparison price is always this product's own previous price
+          (verified from its price history), never a suggested or calculated one. */}
       <span className={`text-muted ${size === "page" ? "text-base" : "text-xs"}`}>
-        <span className="sr-only">Was: </span>
-        <s className="decoration-danger decoration-2">{formatPrice(product.regularPrice!)}</s>
+        Was <s className="decoration-danger decoration-2">{formatPrice(product.regularPrice!)}</s>
       </span>
       {size === "page" && saved ? (
         <span className="text-sm font-semibold text-danger">

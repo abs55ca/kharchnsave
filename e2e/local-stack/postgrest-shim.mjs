@@ -12,6 +12,9 @@
 //   GET  /rest/v1/products         the published catalogue (as anon), shaped
 //                                  like the storefront's select
 //   GET  /rest/v1/admin_members    the admin access check (as the caller)
+//   GET  /rest/v1/product_images?select=storage_path&id=eq.…&product_id=eq.…
+//                                  a photo's stored path (as the caller): the
+//                                  admin photo preview and photo flip lookup
 //   GET  /rest/v1/orders?id=eq.<id> one order with its items and history, the
 //                                  admin order page's read (as the caller, so
 //                                  only a verified admin gets a row)
@@ -26,6 +29,16 @@
 // Users are rows in the stand-in auth.users; an admin_members row makes the
 // user report a verified authenticator factor. No email, MFA codes, rate
 // limits or the many other things real Auth does.
+//
+// Storage stand-in, the private "product-photos" bucket only, in memory, with
+// the bucket's access rules (20261029120000_admin_product_management.sql):
+//   POST   /storage/v1/object/product-photos/<path>   upload: verified admins,
+//          new objects only at <existing product id>/<uuid>.webp
+//   GET    /storage/v1/object/product-photos/<path>   download: verified admins,
+//          or anyone while a published product uses the photo
+//   DELETE /storage/v1/object/product-photos { prefixes }   verified admins
+//   POST   /storage/v1/object/list/product-photos { prefix }   verified admins
+// Not Storage itself: no other buckets, signed URLs, transforms or quotas.
 //
 // Anything else is answered 404. Listens on 127.0.0.1 only.
 
@@ -144,6 +157,60 @@ export async function startShim({ connection, port, authSecret = null, serviceKe
     };
   }
 
+  // Storage stand-in: object path -> { data, type }.
+  const BUCKET = "product-photos";
+  const objects = new Map();
+  const OBJECT_PATH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.webp$/;
+  const storageError = (res, code, error, message) => send(res, code === 409 ? 400 : code, { statusCode: String(code), error, message });
+
+  async function isAdmin(claims) {
+    if (!claims) return false;
+    const { rows } = await as(claims, "select public.is_catalogue_admin() as ok", []);
+    return rows[0].ok === true;
+  }
+
+  async function storage(req, res, url) {
+    const claims = callerClaims(req);
+    const rest = url.pathname.slice("/storage/v1/object/".length);
+    if (req.method === "POST" && rest === `list/${BUCKET}`) {
+      if (!(await isAdmin(claims))) return send(res, 200, []);
+      const prefix = String((await readBody(req)).prefix ?? "").replace(/\/$/, "");
+      const names = [...objects.keys()].filter((name) => name.startsWith(`${prefix}/`)).map((name) => name.slice(prefix.length + 1));
+      return send(res, 200, names.filter((n) => !n.includes("/")).map((name) => ({ name, id: randomUUID(), metadata: {} })));
+    }
+    if (req.method === "DELETE" && rest === BUCKET) {
+      if (!(await isAdmin(claims))) return send(res, 200, []);
+      const removed = [];
+      for (const name of (await readBody(req)).prefixes ?? []) if (objects.delete(name)) removed.push({ name, bucket_id: BUCKET });
+      return send(res, 200, removed);
+    }
+    if (!rest.startsWith(`${BUCKET}/`)) return storageError(res, 404, "Bucket not found", "Bucket not found");
+    const name = decodeURIComponent(rest.slice(BUCKET.length + 1));
+    if (req.method === "POST") {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      if (!(await isAdmin(claims)) || !OBJECT_PATH.test(name)) return storageError(res, 403, "Unauthorized", "new row violates row-level security policy");
+      const { rows } = await pool.query("select 1 from public.products where id::text = split_part($1, '/', 1)", [name]);
+      if (rows.length === 0) return storageError(res, 403, "Unauthorized", "new row violates row-level security policy");
+      if (objects.has(name)) return storageError(res, 409, "Duplicate", "The resource already exists");
+      objects.set(name, { data: Buffer.concat(chunks), type: req.headers["content-type"] ?? "application/octet-stream" });
+      return send(res, 200, { Id: randomUUID(), Key: `${BUCKET}/${name}` });
+    }
+    if (req.method === "GET") {
+      const object = objects.get(name);
+      let allowed = object && (await isAdmin(claims));
+      if (object && !allowed) {
+        const { rows } = await as(claims, `select exists (select 1 from public.product_images i join public.products p on p.id = i.product_id
+          where i.storage_path = $1 and p.publication_status = 'published') as ok`, [name]);
+        allowed = rows[0].ok;
+      }
+      if (!allowed) return storageError(res, 404, "not_found", "Object not found");
+      res.writeHead(200, { "content-type": object.type });
+      return res.end(object.data);
+    }
+    return storageError(res, 405, "Method not allowed", "Method not allowed");
+  }
+
   async function readBody(req) {
     let raw = "";
     for await (const chunk of req) raw += chunk;
@@ -207,6 +274,7 @@ export async function startShim({ connection, port, authSecret = null, serviceKe
     const url = new URL(req.url, "http://127.0.0.1");
     try {
       if (url.pathname.startsWith("/auth/v1/") && authSecret) return await auth(req, res, url);
+      if (url.pathname.startsWith("/storage/v1/object/") && authSecret) return await storage(req, res, url);
       if (req.method === "GET" && url.pathname === "/rest/v1/products") {
         const { rows } = await as(null, CATALOGUE, []);
         return send(res, 200, rows[0].body);
@@ -215,6 +283,16 @@ export async function startShim({ connection, port, authSecret = null, serviceKe
         const filter = /^eq\.([0-9a-f-]{36})$/.exec(url.searchParams.get("user_id") ?? "");
         if (!filter) return send(res, 400, { code: "PGRST100", message: "unsupported filter", details: null, hint: null });
         const { rows } = await as(callerClaims(req), "select user_id from public.admin_members where user_id = $1", [filter[1]]);
+        return send(res, 200, rows);
+      }
+      if (req.method === "GET" && url.pathname === "/rest/v1/product_images") {
+        // The admin photo preview's and the photo flip's lookup (as the caller, so RLS applies).
+        const id = /^eq\.([0-9a-f-]{36})$/.exec(url.searchParams.get("id") ?? "")?.[1];
+        const productId = /^eq\.([0-9a-f-]{36})$/.exec(url.searchParams.get("product_id") ?? "")?.[1];
+        if (!id || !productId || url.searchParams.get("select") !== "storage_path") {
+          return send(res, 400, { code: "PGRST100", message: "unsupported query", details: null, hint: null });
+        }
+        const { rows } = await as(callerClaims(req), "select storage_path from public.product_images where id = $1 and product_id = $2", [id, productId]);
         return send(res, 200, rows);
       }
       if (req.method === "GET" && url.pathname === "/rest/v1/orders") {
