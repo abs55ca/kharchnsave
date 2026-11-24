@@ -36,8 +36,8 @@ export function ProductCard({ product, eager = false }: { product: Product; eage
           style={image.focus ? { objectPosition: image.focus } : undefined}
         />
         <div className="absolute left-2 top-2 flex flex-wrap gap-1">
-          {/* A light "New" tag, a solid one for pre-loved; the sale tag sits by the price. */}
-          <StatusBadge status={product.status} soft />
+          {/* The sale tag sits by the price. */}
+          <StatusBadge status={product.status} />
 
           {showsLightUpBadge(product.lightUp) ? <LightUpBadge /> : null}
           {!inStock ? <SoldOutBadge /> : null}
