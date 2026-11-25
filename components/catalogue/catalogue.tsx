@@ -163,7 +163,7 @@ export async function Catalogue({ searchParams }: { searchParams: Promise<RawSea
         </aside>
 
         <div className="min-w-0">
-          <div className="mb-4 flex items-center justify-between gap-3 lg:justify-end">
+          <div className="mb-4 flex min-w-0 items-center justify-between gap-3 lg:justify-end">
             <MobileFilters facets={facets} total={results.length} />
             <SortSelect />
           </div>

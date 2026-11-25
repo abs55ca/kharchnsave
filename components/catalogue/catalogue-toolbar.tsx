@@ -20,15 +20,16 @@ export function SortSelect() {
   const { query, update } = useCatalogue();
   const id = useId();
   return (
-    <div className="flex items-center gap-2">
-      <label htmlFor={id} className="whitespace-nowrap text-sm text-muted">
+    // Phones: the label is for screen readers only and the select may shrink, so the toolbar never overflows the screen.
+    <div className="flex min-w-0 items-center gap-2">
+      <label htmlFor={id} className="sr-only whitespace-nowrap text-sm text-muted sm:not-sr-only">
         Sort by
       </label>
       <select
         id={id}
         value={query.sort}
         onChange={(event) => update({ sort: event.target.value as SortKey })}
-        className="h-10 min-w-0 rounded-md border border-line bg-white pl-3 pr-8 text-sm font-medium hover:border-forest"
+        className="h-10 w-full min-w-0 max-w-full truncate rounded-md border border-line bg-white pl-3 pr-8 text-sm font-medium hover:border-forest sm:w-auto"
       >
         {SORT_OPTIONS.map((option) => (
           <option key={option.value} value={option.value}>

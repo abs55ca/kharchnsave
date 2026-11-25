@@ -11,7 +11,7 @@ function FooterColumn({ title, links }: { title: string; links: NavLink[] }) {
           <li key={link.href}>
             <Link href={link.href} className="text-white/85 hover:text-white hover:underline">
               {link.label}
-              {link.soon ? <span className="ml-1.5 text-xs text-white/60">(soon)</span> : null}
+              {link.soon && !/soon/i.test(link.label) ? <span className="ml-1.5 text-xs text-white/60">(soon)</span> : null}
             </Link>
           </li>
         ))}

@@ -62,7 +62,8 @@ async function ProductDetails({ params }: Pick<PageProps<"/products/[slug]">, "p
   return (
     <>
       <nav aria-label="Breadcrumb" className="mb-4 text-xs text-muted">
-        <ol className="flex flex-wrap gap-1.5">
+        {/* One line on phones: the product's name (also the heading below) is cut with "…". */}
+        <ol className="flex gap-1.5 whitespace-nowrap sm:flex-wrap">
           <li>
             <Link href="/" className="hover:text-forest hover:underline">
               Home
@@ -75,7 +76,7 @@ async function ProductDetails({ params }: Pick<PageProps<"/products/[slug]">, "p
             </Link>
           </li>
           <li aria-hidden="true">/</li>
-          <li aria-current="page" className="text-ink">
+          <li aria-current="page" className="min-w-0 truncate text-ink sm:whitespace-normal">
             {product.name}
           </li>
         </ol>
@@ -85,7 +86,9 @@ async function ProductDetails({ params }: Pick<PageProps<"/products/[slug]">, "p
         <ProductGallery images={product.images} name={product.name} />
 
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted">{product.brand}</p>
+          {product.brand.trim().toLowerCase() !== "unbranded" ? (
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted">{product.brand}</p>
+          ) : null}
           <h1 className="mt-1 text-2xl font-extrabold leading-tight tracking-tight md:text-3xl">
             {product.name}
           </h1>

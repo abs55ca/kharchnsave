@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useCart } from "@/components/cart/cart-provider";
+import { isOnSale } from "@/lib/catalog/pricing";
+import { formatPrice } from "@/lib/format";
 import { fullName } from "@/lib/catalog/product-utils";
 import type { Product, ProductVariant } from "@/lib/catalog/types";
 import { sizeConversion } from "@/lib/sizes";
@@ -29,6 +31,8 @@ export function PurchasePanel({ product }: { product: Product }) {
   const soldOut = product.variants.every((v) => v.stock === 0);
   const atLimit = !!selected && selected.stock > 0 && inCart >= selected.stock;
   const status = stockMessage(selected, oneOff);
+  const mainButton = useRef<HTMLButtonElement>(null);
+  const showBar = useStickyBar(mainButton);
 
   function handleAdd() {
     if (!selected) {
@@ -133,6 +137,7 @@ export function PurchasePanel({ product }: { product: Product }) {
         {/* One button whose action changes, so focus can return to it after
             the cart drawer closes. */}
         <button
+          ref={mainButton}
           type="button"
           onClick={atLimit ? () => openCart() : handleAdd}
           disabled={soldOut}
@@ -164,6 +169,60 @@ export function PurchasePanel({ product }: { product: Product }) {
           </p>
         ) : null}
       </div>
+      {showBar ? (
+        // Phones: the price and the same button, kept at the bottom of the screen while the main one is out of view.
+        <div className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-white/95 px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 shadow-[0_-4px_16px_rgb(0_0_0/0.08)] backdrop-blur lg:hidden">
+          <div className="mx-auto flex max-w-xl items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs text-muted">{selected ? `EU ${selected.size}` : "Choose a size"}</p>
+              <p className="text-base font-bold leading-tight">
+                {formatPrice(product.price)}
+                {isOnSale(product) ? (
+                  <s className="ml-1.5 text-xs font-normal text-muted">{formatPrice(product.regularPrice!)}</s>
+                ) : null}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                if (atLimit) return openCart();
+                if (!selected) {
+                  // A size has to be picked first: take them to the sizes.
+                  mainButton.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                }
+                handleAdd();
+              }}
+              disabled={soldOut}
+              className={`btn h-12 shrink-0 px-6 text-[15px] ${soldOut ? "btn-outline" : atLimit ? "btn-forest" : "btn-lime"}`}
+            >
+              {soldOut ? "Sold out" : atLimit ? "View cart" : "Add to cart"}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
+}
+
+/**
+ * Whether the phone add-to-cart bar shows: the main button is off screen and
+ * the footer isn't in view (so the bar never covers it).
+ */
+function useStickyBar(target: React.RefObject<HTMLElement | null>) {
+  const [mainVisible, setMainVisible] = useState(true);
+  const [footerVisible, setFooterVisible] = useState(false);
+  useEffect(() => {
+    const main = target.current;
+    const footer = document.querySelector("footer");
+    if (!main || typeof IntersectionObserver === "undefined") return;
+    const a = new IntersectionObserver(([e]) => setMainVisible(e.isIntersecting));
+    a.observe(main);
+    const b = new IntersectionObserver(([e]) => setFooterVisible(e.isIntersecting));
+    if (footer) b.observe(footer);
+    return () => {
+      a.disconnect();
+      b.disconnect();
+    };
+  }, [target]);
+  return !mainVisible && !footerVisible;
 }

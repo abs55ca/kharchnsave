@@ -1,7 +1,9 @@
 import Link from "next/link";
+import { Suspense } from "react";
 import { CartButton } from "@/components/cart/cart-button";
 import { UserIcon } from "@/components/icons";
 import { HELP_NAV, MAIN_NAV, SITE } from "@/lib/site";
+import { BackButton } from "./back-button";
 import { Logo } from "./logo";
 import { MobileMenu } from "./mobile-menu";
 import { SearchForm } from "./search-form";
@@ -22,8 +24,12 @@ export function SiteHeader() {
   return (
     <header className="border-b border-line bg-white">
       <div className="container-page">
-        <div className="flex h-16 items-center gap-3 lg:h-[72px] lg:gap-8">
+        <div className="flex h-16 items-center gap-2 sm:gap-3 lg:h-[72px] lg:gap-8">
           <MobileMenu />
+          {/* It reads the URL, so it streams in after the static header. */}
+          <Suspense fallback={null}>
+            <BackButton />
+          </Suspense>
           <Logo className="h-8 w-auto sm:h-9 lg:h-10" />
           <SearchForm
             id="site-search-desktop"
