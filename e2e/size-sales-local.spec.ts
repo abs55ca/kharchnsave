@@ -105,15 +105,29 @@ test("rules are validated, previewed per product, applied to matching sizes only
   await page.goto("/admin/pricing");
 
   // Group totals: 6 pairs ×3 in stock + the two-size shoe's 6 = 24 pairs; Rs. 68,580 at their prices (no sales yet);
-  // cost Rs. 6,000 for the 6 costed pairs, whose Rs. 12,870 less cost leaves Rs. 6,870.
+  // cost Rs. 1,000 a pair for the 6 costed pairs (Rs. 6,000), the other 18 have none.
   const totals = vis(page.locator("section").filter({ has: page.getByRole("heading", { name: "Group totals" }) }));
   const totalsRow = totals.getByRole("row").filter({ has: page.getByRole("rowheader", { name: GROUP }) });
+  await totals.getByLabel("Agent discount (%)").fill("10");
+  await totals.getByLabel("Agent commission (%)").fill("10");
+  await totalsRow.getByLabel(`Packaging per pair for ${GROUP} (Rs.)`).fill("50");
+  await totalsRow.getByLabel(`Shipping per pair for ${GROUP} (Rs.)`).fill("200");
   await expect(totalsRow).toContainText("24");
-  await expect(totalsRow).toContainText("Rs. 68,580");
-  await expect(totalsRow).toContainText("Rs. 2,857.50"); // average per pair
+  await expect(totalsRow).toContainText("Rs. 1,000"); // cost per pair
+  await expect(totalsRow).toContainText("18 pair(s) not set");
+  await expect(totalsRow).toContainText("Rs. 68,580"); // sales
+  await expect(totalsRow).toContainText("Rs. 2,857.50"); // average price
+  // Total cost: Rs. 6,000 of shoes + 24 × (Rs. 50 + Rs. 200). Discount 10% of 68,580; commission 10% of the 61,722 left.
+  await expect(totalsRow).toContainText("Rs. 12,000");
+  await expect(totalsRow).toContainText("Rs. 6,858");
+  await expect(totalsRow).toContainText("Rs. 6,172.20");
+  // Profit: 68,580 − 12,000 − 6,858 − 6,172.20.
+  await expect(totalsRow).toContainText("Rs. 43,549.80");
+  await expect(totalsRow).toContainText("Too high: 18 pair(s) have no cost yet");
+  // Back to no packaging or shipping (kept in this browser), for the totals further down.
+  await totalsRow.getByLabel(`Packaging per pair for ${GROUP} (Rs.)`).fill("");
+  await totalsRow.getByLabel(`Shipping per pair for ${GROUP} (Rs.)`).fill("");
   await expect(totalsRow).toContainText("Rs. 6,000");
-  await expect(totalsRow).toContainText("Rs. 6,870");
-  await expect(totalsRow).toContainText("18 pair(s) without a cost left out");
   await db!.query("update private.product_pricing set cost_paisa = null where product_id in ($1, $2)", [shoe("EU24").id, shoe("EU25").id]);
 
   const panel = vis(page.locator("section").filter({ has: page.getByRole("heading", { name: "Sales by size" }) }));
@@ -202,8 +216,9 @@ test("rules are validated, previewed per product, applied to matching sizes only
   await page.reload();
   const totalsAfter = vis(page.locator("section").filter({ has: page.getByRole("heading", { name: "Group totals" }) }))
     .getByRole("row").filter({ has: page.getByRole("rowheader", { name: GROUP }) });
-  await expect(totalsAfter).toContainText("Rs. 24,000");
-  await expect(totalsAfter).not.toContainText("without a cost");
+  await expect(totalsAfter).toContainText("Rs. 24,000"); // total cost
+  await expect(totalsAfter).not.toContainText("no cost yet");
+  await expect(totalsAfter).not.toContainText("not set");
   // Again: nothing to change.
   await costForm.getByRole("combobox", { name: "Group", exact: true }).selectOption({ label: `${GROUP} (7 shoes)` });
   await costForm.getByLabel("Cost per pair (Rs.)").fill("1000");
