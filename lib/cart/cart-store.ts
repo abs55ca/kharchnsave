@@ -1,7 +1,7 @@
 import type { Condition, ItemStatus } from "@/lib/catalog/types";
 
 /**
- * Demo cart, persisted in localStorage. Each line keeps a snapshot of what
+ * The cart, persisted in localStorage. Each line keeps a snapshot of what
  * the shopper saw when adding it, including the stock limit at that time.
  * A real checkout must re-check stock and prices on the server.
  */

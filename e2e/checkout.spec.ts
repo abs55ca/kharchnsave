@@ -15,7 +15,7 @@ const KEY = "e2e".padEnd(43, "x");
 test.describe("checkout while it is off", () => {
   test("the checkout page explains that ordering isn't open and asks for nothing", async ({ page }) => {
     await page.goto("/checkout");
-    await expect(page.getByRole("heading", { name: /Checkout isn.t connected yet/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /Online ordering is paused right now/ })).toBeVisible();
     // No personal details are asked for (the site header's search box aside).
     await expect(page.locator("main input, main textarea")).toHaveCount(0);
     await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);

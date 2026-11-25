@@ -35,7 +35,6 @@ export function SiteFooter() {
       <div className="border-t border-white/15">
         <div className="container-page flex flex-col gap-2 py-5 text-xs text-white/70 md:flex-row md:items-center md:justify-between">
           <p>© Kharch n Save. Prices shown in Pakistani rupees (Rs.).</p>
-          <p>Checkout is not yet connected.</p>
         </div>
       </div>
     </footer>

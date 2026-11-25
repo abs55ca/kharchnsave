@@ -169,12 +169,3 @@ export function CartAvailabilityNote() {
   }
   return null;
 }
-
-export function DemoCheckoutNote() {
-  return (
-    <p className="rounded-md bg-cream px-3 py-2 text-xs leading-relaxed text-muted">
-      <strong className="font-semibold text-ink">Demo store.</strong> Checkout
-      isn&apos;t connected yet, so no payment is taken and no order is placed.
-    </p>
-  );
-}

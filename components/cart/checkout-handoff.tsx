@@ -7,7 +7,7 @@ import { CartAvailabilityNote } from "./cart-lines";
 import { useCart } from "./cart-provider";
 
 /**
- * Shown instead of a checkout while no commerce backend is connected.
+ * Shown instead of the checkout while ordering is switched off on the server.
  * It never collects payment or personal details.
  */
 export function CheckoutHandoff() {
@@ -23,18 +23,12 @@ export function CheckoutHandoff() {
   return (
     <div className="grid gap-8 lg:grid-cols-[1fr_360px] lg:items-start">
       <div className="rounded-lg border border-line p-6 md:p-8">
-        <p className="eyebrow text-muted">Demo store</p>
-        <h2 className="mt-2 text-xl font-bold md:text-2xl">Checkout isn&apos;t connected yet</h2>
+        <p className="eyebrow text-muted">Checkout</p>
+        <h2 className="mt-2 text-xl font-bold md:text-2xl">Online ordering is paused right now</h2>
         <div className="mt-4 space-y-3 text-sm leading-relaxed text-ink/85">
           <p>
-            Kharch n Save is running as a preview. Your cart works and is saved on this
-            device, but there is no payment step yet, so no order can be placed and nothing
-            will be charged.
-          </p>
-          <p>
-            Once the store is connected to its commerce platform, the Checkout button will
-            pass your cart to that platform&apos;s checkout to confirm delivery details and
-            payment.
+            We can&apos;t take orders on the website at the moment. Your cart is saved on this
+            device, so you can come back and place your order later. Nothing has been charged.
           </p>
         </div>
         <div className="mt-6 flex flex-wrap gap-2">
