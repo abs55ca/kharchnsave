@@ -18,6 +18,8 @@ export type PricingSettings = {
   reference_min_days: number | null;
   new_sale_target_bp: number;
   preloved_sale_target_bp: number;
+  /** 0-500: each automatic price is up to this much below the score price (20261125120000_price_spread.sql; missing before it). */
+  price_spread_bp?: number;
   version: number;
 };
 
@@ -32,7 +34,7 @@ export type PricingOverview = {
   counts: { auto: number; manual: number; needs_pricing: number; out_of_date: number; unknown_cost: number };
 };
 
-export type Calculation = { status: "ok" | "giveaway" | "needs_pricing" | "too_small" | "not_set"; calculated_paisa: number | null; price_paisa: number | null };
+export type Calculation = { status: "ok" | "giveaway" | "needs_pricing" | "too_small" | "not_set"; calculated_paisa: number | null; price_paisa: number | null; spread_bp?: number };
 
 export type PricingProduct = {
   product_id: string;

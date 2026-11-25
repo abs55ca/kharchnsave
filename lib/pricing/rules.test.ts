@@ -10,6 +10,7 @@ import {
   referralScenario,
   salePrice,
   scorePrice,
+  spreadOffsetBp,
 } from "./rules";
 
 const rs = (rupees: number) => rupees * 100;
@@ -175,5 +176,25 @@ describe("percent input", () => {
     expect(percentToBp("abc")).toBeNull();
     expect(formatBp(1250)).toBe("12.5%");
     expect(formatBp(1500)).toBe("15%");
+  });
+});
+
+describe("price spread", () => {
+  it("gives each product a fixed offset from 0 to the spread, from the end of its id", () => {
+    expect(spreadOffsetBp("a7a7a7a7-0000-4000-8000-000000000000", 500)).toBe(0);
+    expect(spreadOffsetBp("a7a7a7a7-0000-4000-8000-0000000001f4", 500)).toBe(500); // 0x1f4 = 500
+    expect(spreadOffsetBp("a7a7a7a7-0000-4000-8000-0000000001f5", 500)).toBe(0);
+    expect(spreadOffsetBp("a7a7a7a7-0000-4000-8000-ffffffffffff", 500)).toBe(0xffffffff % 501);
+    expect(spreadOffsetBp("a7a7a7a7-0000-4000-8000-0000000001f4", 0)).toBe(0);
+  });
+
+  it("takes the offset off before the price ending, and never goes above the score price", () => {
+    expect(scorePrice(rs(6000), 50, 95, false, 0)).toEqual(scorePrice(rs(6000), 50, 95));
+    // Rs. 3,000 less 5% = Rs. 2,850 → Rs. 2,795.
+    expect(scorePrice(rs(6000), 50, 95, false, 500)).toEqual({ status: "ok", calculatedPaisa: rs(2850), pricePaisa: rs(2795) });
+    // 1%: Rs. 2,970 → Rs. 2,895.
+    expect(scorePrice(rs(6000), 50, 95, false, 100).pricePaisa).toBe(rs(2895));
+    expect(scorePrice(rs(6000), 100, 95, false, 1).calculatedPaisa).toBeLessThan(rs(6000));
+    expect(() => scorePrice(rs(6000), 50, 95, false, 501)).toThrow(RangeError);
   });
 });

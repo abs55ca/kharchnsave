@@ -136,16 +136,20 @@ export async function saveSettingsAction(_previous: PricingFormState, formData: 
   const target = (name: string) => (text(formData, name) === "100" ? 10000 : percentToBp(text(formData, name), { min: 0, max: 10000 }));
   const newTarget = target("newTarget");
   const prelovedTarget = target("prelovedTarget");
+  // Price spread: only on a database that has it (the field shows only then). Empty is 0.
+  const hasSpread = formData.has("spread");
+  const spread = !hasSpread ? null : text(formData, "spread") ? percentToBp(text(formData, "spread"), { min: 0, max: 500 }) : 0;
   if (!Number.isInteger(ending) || ending < 0 || ending > 99) return { ok: false, message: "The price ending is a number from 0 to 99, e.g. 95." };
   if ((text(formData, "minProfit") && minProfit === null) || (text(formData, "minMargin") && minMargin === null)) {
     return { ok: false, message: "Enter the minimum profit in rupees and the minimum margin as a percentage, or leave them empty." };
   }
   if (minDays !== null && (!Number.isInteger(minDays) || minDays < 1 || minDays > 365)) return { ok: false, message: "Minimum days are 1 to 365, or empty for none." };
   if (newTarget === null || prelovedTarget === null) return { ok: false, message: "Coverage targets are percentages from 0 to 100." };
+  if (hasSpread && spread === null) return { ok: false, message: "The price spread is a percentage from 0 to 5, e.g. 5." };
   const { state, answer } = await write("admin_save_pricing_settings", {
     p_expected_version: version, p_request_id: requestId,
     p_settings: { price_ending_rupees: ending, min_profit_paisa: minProfit, min_margin_bp: minMargin, reference_min_days: minDays,
-      new_sale_target_bp: newTarget, preloved_sale_target_bp: prelovedTarget },
+      new_sale_target_bp: newTarget, preloved_sale_target_bp: prelovedTarget, ...(hasSpread ? { price_spread_bp: spread } : {}) },
   }, "pricing settings");
   if (state) return state;
   refresh();

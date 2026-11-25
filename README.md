@@ -2214,6 +2214,29 @@ this section of the Pricing page is unavailable.
 local stand-in). The migration has **not** been applied to any hosted project, the site version with
 this feature has **not** been deployed, and no live sale has been started.
 
+### Price spread
+
+**Pricing → Settings → Price spread (%, 0 to 5)** stops every shoe in a group at the same score
+from getting exactly the same price.
+
+- **The rule:** each product gets its own fixed offset, from 0 up to the spread, below its score
+  price: the last 8 hex digits of its id, as a number, mod (spread in basis points + 1). Then the
+  price ending as usual: calculated = floor(maximum × score × (10000 − offset) / 1 000 000).
+- **Only lower:** a score of 100 never goes above the group maximum.
+- **Fixed per product:** repricing again never moves it, so prices don't jump around.
+- **With the 95 ending:** prices land on the Rs. 100 steps within the spread, e.g. a Rs. 3,000
+  score price with a 5% spread gives Rs. 2,795, Rs. 2,895 or Rs. 2,995.
+- **Nothing changes on save:** automatic prices show as out of date until **Review out-of-date
+  automatic prices** is previewed and confirmed. Products in a running size sale are skipped (end
+  it first, reprice, then apply the size sale again; its rules stay saved).
+- 0 (the default) turns it off and gives exactly the previous prices.
+  [`lib/pricing/rules.ts`](lib/pricing/rules.ts) (`spreadOffsetBp`, `scorePrice`) mirrors the
+  database for the instant estimate; `db-tests/pricing.test.ts` checks both agree.
+
+**Setup (owner).** Apply `20261125120000_price_spread.sql` (after every earlier migration, through
+`20261124120000_size_sales.sql`), then deploy. The setting starts at 0. Without the migration, the
+Settings form says the spread needs it and everything else works as before.
+
 ## Enabling online payments
 
 Only cash on delivery is built. Card or wallet payments (for example JazzCash or

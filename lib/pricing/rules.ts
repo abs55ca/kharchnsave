@@ -9,6 +9,10 @@
  *
  * Rules (README, "Score pricing and sales"):
  *   calculated   = floor(maximum × score / 100)                      (paisa)
+ *   spread       = with a price spread S (0-500 bp), each product's own
+ *                  offset 0..S bp (spreadOffsetBp, from its id) comes off
+ *                  first: floor(maximum × score × (10000 − offset) / 1 000 000)
+ *                  (20261125120000_price_spread.sql).
  *   price ending = the highest positive whole-rupee amount ending in E
  *                  (default 95) that doesn't exceed the calculated amount;
  *                  an amount that already ends in E keeps it. None exists
@@ -39,14 +43,30 @@ export type ScoreResult =
   | { status: "needs_pricing"; calculatedPaisa: 0; pricePaisa: null }
   | { status: "too_small"; calculatedPaisa: number; pricePaisa: null };
 
-/** The regular price for a score (0-100) under a group maximum (paisa). */
-export function scorePrice(maxPaisa: number, score: number, ending: number, giveaway = false): ScoreResult {
+export const MAX_SPREAD_BP = 500;
+
+/**
+ * A product's own offset below the score price: 0..spreadBp basis points, the
+ * last 8 hex digits of its id (a number) mod (spreadBp + 1). The same every
+ * time, so repricing never moves it. Mirrors private.spread_offset_bp.
+ */
+export function spreadOffsetBp(productId: string, spreadBp: number): number {
+  if (!isInt(spreadBp) || spreadBp <= 0) return 0;
+  const hex = productId.replace(/-/g, "").slice(-8);
+  if (!/^[0-9a-f]{8}$/i.test(hex)) throw new RangeError("Not a product id.");
+  return parseInt(hex, 16) % (spreadBp + 1);
+}
+
+/** The regular price for a score (0-100) under a group maximum (paisa), `offsetBp` (spreadOffsetBp) below it before the ending. */
+export function scorePrice(maxPaisa: number, score: number, ending: number, giveaway = false, offsetBp = 0): ScoreResult {
   if (!isInt(maxPaisa) || maxPaisa <= 0 || maxPaisa > MAX_PRICE_PAISA) throw new RangeError("Maximum out of range.");
   if (!isInt(score) || score < 0 || score > 100) throw new RangeError("Scores are whole numbers from 0 to 100.");
   if (score === 0) {
     return giveaway ? { status: "giveaway", calculatedPaisa: 0, pricePaisa: 0 } : { status: "needs_pricing", calculatedPaisa: 0, pricePaisa: null };
   }
-  const calculated = Math.floor((maxPaisa * score) / 100);
+  if (!isInt(offsetBp) || offsetBp < 0 || offsetBp > MAX_SPREAD_BP) throw new RangeError("Spread offsets are 0 to 500 basis points.");
+  // Whole numbers below 2^53, so the division and floor are exact enough (as the SQL's numeric).
+  const calculated = Math.floor((maxPaisa * score * (10000 - offsetBp)) / 1_000_000);
   const price = priceWithEnding(calculated, ending);
   return price === null ? { status: "too_small", calculatedPaisa: calculated, pricePaisa: null } : { status: "ok", calculatedPaisa: calculated, pricePaisa: price };
 }

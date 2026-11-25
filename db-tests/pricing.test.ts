@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { priceWithEnding, salePrice, scorePrice } from "../lib/pricing/rules";
+import { priceWithEnding, salePrice, scorePrice, spreadOffsetBp } from "../lib/pricing/rules";
 import { asRole, createDatabase, simultaneously, type Claims, type TestDatabase } from "./lib/db";
 
 /*
@@ -204,6 +204,34 @@ describe("1. the rules: SQL and lib/pricing/rules.ts agree", () => {
         expect(r.c, `${regular} at ${r.bp}`).toEqual({ raw_paisa: ts.rawPaisa, price_paisa: ts.pricePaisa, rounding_paisa: ts.roundingPaisa, actual_percent: ts.actualPercent });
       }
     }
+  });
+});
+
+describe("1b. the price spread: SQL and lib/pricing/rules.ts agree", () => {
+  it("each product's offset, and the price it gives, for many ids and spreads", async () => {
+    const ids = [...Array.from({ length: 300 }, () => randomUUID()), "00000000-0000-4000-8000-000000000000", "ffffffff-ffff-4fff-bfff-ffffffffffff"];
+    for (const spread of [0, 1, 250, 500]) {
+      for (const [max, score] of [[rs(6000), 47], [rs(5000), 100], [rs(100), 1], [rs(1000000), 99]] as const) {
+        const { rows } = await db.query<{ id: string; o: number; c: { status: string; calculated_paisa: number; price_paisa: number | null; spread_bp: number } }>(
+          "select id::text, private.spread_offset_bp(id, $1) as o, private.score_calculation($2, $3, false, 95, id, $1) as c from unnest($4::uuid[]) id",
+          [spread, max, score, ids]);
+        for (const r of rows) {
+          const offset = spreadOffsetBp(r.id, spread);
+          expect(r.o, `${r.id} at ${spread}`).toBe(offset);
+          expect(offset).toBeGreaterThanOrEqual(0);
+          expect(offset).toBeLessThanOrEqual(spread);
+          const ts = scorePrice(max, score, 95, false, offset);
+          expect({ status: r.c.status, calc: r.c.calculated_paisa, price: r.c.price_paisa, spread: r.c.spread_bp }, `${r.id} ${max} × ${score} at ${spread}`)
+            .toEqual({ status: ts.status, calc: ts.calculatedPaisa, price: ts.pricePaisa, spread: offset });
+          // Never above the price without a spread.
+          expect(r.c.calculated_paisa).toBeLessThanOrEqual(Math.floor((max * score) / 100));
+        }
+      }
+    }
+    // Spread 0 is exactly the 4-argument calculation.
+    const same = await db.query<{ a: unknown; b: unknown }>(
+      "select private.score_calculation($1, 37, false, 95) - 'spread_bp' as a, private.score_calculation($1, 37, false, 95, $2, 0) - 'spread_bp' as b", [rs(7000), ids[0]]);
+    expect(same.rows[0].a).toEqual(same.rows[0].b);
   });
 });
 
@@ -430,6 +458,45 @@ describe("4. score pricing", () => {
     expect(await admin("select public.admin_apply_reprice($1, $2, $3) as r", [request, j(changes), preview.token])).toMatchObject({ result: "applied", replayed: true });
     // An old preview of the same change is stale now.
     expect((await admin<{ result: string }>("select public.admin_apply_reprice($1, $2, $3) as r", [randomUUID(), j(changes), preview.token])).result).toBe("stale");
+  });
+
+  it("a price spread gives shoes at the same score their own prices, only after a review, never above the score price", async () => {
+    const g = await createGroup("Spread test", rs(6000));
+    const shoes = await Promise.all(Array.from({ length: 30 }, () => product({ price: rs(5000) })));
+    await setPricing(shoes.map((p) => ({ product_id: p.id, mode: "auto", group_id: g, score: 50 })));
+    for (const p of shoes) expect((await row(p.id)).price_paisa).toBe(rs(2995));
+    // Out of range is refused.
+    const current = (await admin<{ settings: Record<string, unknown> & { version: number } }>("select public.admin_pricing_overview() as r")).settings;
+    expect((await once(ADMIN2, "select public.admin_save_pricing_settings($1, $2, $3) as r", [current.version, randomUUID(), j({ ...current, price_spread_bp: 501 })])).error?.hint).toBe("invalid_settings");
+    // Leaving it out (an older page) keeps it.
+    await settings({ price_spread_bp: 500 });
+    await settings({ price_spread_bp: undefined as unknown as null });
+    const overview = await admin<{ settings: { price_spread_bp: number }; counts: { out_of_date: number } }>("select public.admin_pricing_overview() as r");
+    expect(overview.settings.price_spread_bp).toBe(500);
+    // Saving the setting changes no price; they show as out of date instead.
+    for (const p of shoes) expect((await row(p.id)).price_paisa).toBe(rs(2995));
+    const expected = shoes.map((p) => scorePrice(rs(6000), 50, 95, false, spreadOffsetBp(p.id, 500)).pricePaisa!);
+    expect(overview.counts.out_of_date).toBeGreaterThanOrEqual(expected.filter((e) => e !== rs(2995)).length);
+    const listed = await admin<{ items: { product_id: string; calculation: { price_paisa: number; spread_bp: number } }[] }>(
+      "select public.admin_pricing_products($1) as r", [j({ group_id: g, limit: 100 })]);
+    for (const item of listed.items) {
+      expect(item.calculation.price_paisa).toBe(expected[shoes.findIndex((p) => p.id === item.product_id)]);
+    }
+    const preview = await admin<Plan>("select public.admin_preview_reprice('[]') as r");
+    await admin("select public.admin_apply_reprice($1, '[]', $2) as r", [randomUUID(), preview.token]);
+    const prices = await Promise.all(shoes.map(async (p) => (await row(p.id)).price_paisa));
+    expect(prices).toEqual(expected);
+    expect(Math.max(...prices)).toBeLessThanOrEqual(rs(2995));
+    expect(Math.min(...prices)).toBeGreaterThanOrEqual(rs(2795)); // at most 5% below Rs. 3,000, then the ending
+    expect(new Set(prices).size).toBeGreaterThan(1);
+    // Repricing again moves nothing: each shoe's spread is fixed.
+    const again = await admin<Plan>("select public.admin_preview_reprice('[]') as r");
+    expect(again.lines.filter((l) => shoes.some((p) => p.id === l.product_id) && l.action === "apply")).toHaveLength(0);
+    // Back to no spread for the tests below.
+    await settings({ price_spread_bp: 0 });
+    const back = await admin<Plan>("select public.admin_preview_reprice('[]') as r");
+    await admin("select public.admin_apply_reprice($1, '[]', $2) as r", [randomUUID(), back.token]);
+    for (const p of shoes) expect((await row(p.id)).price_paisa).toBe(rs(2995));
   });
 
   it("changing the price ending, then bringing automatic prices up to date", async () => {

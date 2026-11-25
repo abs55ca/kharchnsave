@@ -21,7 +21,7 @@ import {
 import { SubmitButton, useRequestAction } from "@/components/admin/agent-forms";
 import type { Campaign, CampaignLine, CampaignPlan, Candidate, Economics, Plan, PlanLine, PricingGroup, PricingProduct, PricingSettings } from "@/lib/admin/pricing";
 import { formatPrice } from "@/lib/format";
-import { displayedDiscount, formatBp, scorePrice } from "@/lib/pricing/rules";
+import { displayedDiscount, formatBp, scorePrice, spreadOffsetBp } from "@/lib/pricing/rules";
 
 /*
  * Score pricing and sale campaign forms (phones first). Estimates while
@@ -102,17 +102,30 @@ export function ScoreInput({ value, onChange, id, name }: { value: number | null
   );
 }
 
-/** What a score gives under a maximum, with the price ending (an estimate; the database decides). */
-export function PriceEstimate({ maxPaisa, score, ending, giveaway = false }: { maxPaisa: number | null; score: number | null; ending: number; giveaway?: boolean }) {
+/**
+ * What a score gives under a maximum, with the price spread and the price ending (an estimate; the database decides).
+ * With a product (`productId`) its own spread is applied; without one (several shoes), the range is described.
+ */
+export function PriceEstimate({ maxPaisa, score, ending, giveaway = false, spreadBp = 0, productId }: {
+  maxPaisa: number | null; score: number | null; ending: number; giveaway?: boolean; spreadBp?: number; productId?: string;
+}) {
   if (maxPaisa === null || score === null) return <p className="text-sm text-muted">Choose a group and a score to see the price.</p>;
-  const r = scorePrice(maxPaisa, score, ending, giveaway);
+  const offset = productId ? spreadOffsetBp(productId, spreadBp) : 0;
+  const r = scorePrice(maxPaisa, score, ending, giveaway, offset);
   if (r.status === "needs_pricing") return <p className="text-sm font-medium text-danger">Score 0 means “needs pricing”: nothing is saved unless you make it an explicit giveaway.</p>;
   if (r.status === "giveaway") return <p className="text-sm font-medium text-danger">Giveaway: Rs. 0.</p>;
   if (r.status === "too_small") return <p className="text-sm font-medium text-danger">{rupees(r.calculatedPaisa)} is too small for a price ending in {ending}: flagged for review, not saved.</p>;
   return (
     <p className="text-sm">
       Estimated price <span className="text-lg font-bold">{rupees(r.pricePaisa)}</span>{" "}
-      <span className="text-muted">({rupees(maxPaisa)} × {score}% = {rupees(r.calculatedPaisa)}, ending {ending})</span>
+      <span className="text-muted">
+        ({rupees(maxPaisa)} × {score}%{offset ? ` − this shoe’s ${formatBp(offset)} spread` : ""} = {rupees(r.calculatedPaisa)}, ending {ending})
+      </span>
+      {spreadBp > 0 && !productId ? (
+        <span className="block text-xs text-muted">
+          With the {formatBp(spreadBp)} price spread, each shoe then gets its own price up to {formatBp(spreadBp)} below this, so they don’t all look the same.
+        </span>
+      ) : null}
     </p>
   );
 }
@@ -253,6 +266,20 @@ export function SettingsForm({ settings }: { settings: PricingSettings }) {
           <input name="minDays" inputMode="numeric" className={`${INPUT} mt-1 h-11 font-normal`} defaultValue={settings.reference_min_days ?? ""} />
           <span className={HINT}>Your own policy; no legal minimum is assumed. Empty: any recorded offer counts.</span>
         </label>
+        {settings.price_spread_bp !== undefined ? (
+          <label className={LABEL}>
+            Price spread (%, 0 to 5)
+            <input name="spread" inputMode="decimal" className={`${INPUT} mt-1 h-11 font-normal`} defaultValue={pct(settings.price_spread_bp)} placeholder="0" />
+            <span className={HINT}>
+              So shoes in a group don’t all cost the same: each one’s automatic price is its own fixed amount, up to this much, below
+              its score price (then the price ending). It never goes above the group maximum. 0 turns it off.
+            </span>
+          </label>
+        ) : (
+          <p className={`${HINT} sm:col-span-2`}>
+            Price spread needs the database update <code className="font-mono">supabase/migrations/20261125120000_price_spread.sql</code>.
+          </p>
+        )}
         <label className={LABEL}>
           New shoes on sale: target (%)
           <input name="newTarget" inputMode="decimal" className={`${INPUT} mt-1 h-11 font-normal`} defaultValue={pct(settings.new_sale_target_bp)} required />
@@ -434,7 +461,7 @@ export function BulkPricingTable({ products, groups, settings }: { products: Pri
             <p id="bulk-score-hint" className={HINT}>The shoe’s relative value. Discounts are set separately in Sales.</p>
           </div>
         </div>
-        {mode === "auto" ? <PriceEstimate maxPaisa={group?.max_price_paisa ?? null} score={score} ending={settings.price_ending_rupees} /> : null}
+        {mode === "auto" ? <PriceEstimate maxPaisa={group?.max_price_paisa ?? null} score={score} ending={settings.price_ending_rupees} spreadBp={settings.price_spread_bp ?? 0} /> : null}
         <div className="flex flex-wrap items-end gap-3">
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={setCostToo} onChange={(e) => setSetCostToo(e.target.checked)} /> Also set the cost</label>
           {setCostToo ? (
@@ -560,7 +587,8 @@ export function ProductPricingPanel({ pricing }: { pricing: import("@/lib/admin/
           <input inputMode="decimal" className={`${INPUT} mt-1 h-11 font-normal`} value={cost} onChange={(e) => setCost(e.target.value)} placeholder="Unknown" />
         </label>
       </div>
-      <PriceEstimate maxPaisa={group?.max_price_paisa ?? null} score={score} ending={pricing.settings.price_ending_rupees} giveaway={giveaway && score === 0} />
+      <PriceEstimate maxPaisa={group?.max_price_paisa ?? null} score={score} ending={pricing.settings.price_ending_rupees} giveaway={giveaway && score === 0}
+        spreadBp={pricing.settings.price_spread_bp ?? 0} productId={pricing.product_id} />
       {mode === "auto" && score === 0 ? (
         <label className="flex items-start gap-2 rounded-md border border-danger/40 p-2 text-sm">
           <input type="checkbox" checked={giveaway} className="mt-0.5"
