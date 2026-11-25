@@ -5,7 +5,7 @@ import { Suspense } from "react";
 
 /**
  * Pages that stand on their own, without the shop's announcement bar,
- * header and footer (the footer carries the demo-store notice): the links
+ * header and footer (the footer carries the store notices): the links
  * page reached from the merchandise QR code.
  */
 export const STANDALONE_PATHS = new Set(["/links"]);

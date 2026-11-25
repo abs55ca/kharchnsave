@@ -100,7 +100,22 @@ test("rules are validated, previewed per product, applied to matching sizes only
   await signInAdmin(context, baseURL!);
   const page = await context.newPage();
   page.on("dialog", (d) => void d.accept());
+  // A cost on two shoes: the group totals subtract it for those pairs only.
+  await db!.query("update private.product_pricing set cost_paisa = 100000 where product_id in ($1, $2)", [shoe("EU24").id, shoe("EU25").id]);
   await page.goto("/admin/pricing");
+
+  // Group totals: 6 pairs ×3 in stock + the two-size shoe's 6 = 24 pairs; Rs. 68,580 at their prices (no sales yet);
+  // cost Rs. 6,000 for the 6 costed pairs, whose Rs. 12,870 less cost leaves Rs. 6,870.
+  const totals = vis(page.locator("section").filter({ has: page.getByRole("heading", { name: "Group totals" }) }));
+  const totalsRow = totals.getByRole("row").filter({ has: page.getByRole("rowheader", { name: GROUP }) });
+  await expect(totalsRow).toContainText("24");
+  await expect(totalsRow).toContainText("Rs. 68,580");
+  await expect(totalsRow).toContainText("Rs. 2,857.50"); // average per pair
+  await expect(totalsRow).toContainText("Rs. 6,000");
+  await expect(totalsRow).toContainText("Rs. 6,870");
+  await expect(totalsRow).toContainText("18 pair(s) without a cost left out");
+  await db!.query("update private.product_pricing set cost_paisa = null where product_id in ($1, $2)", [shoe("EU24").id, shoe("EU25").id]);
+
   const panel = vis(page.locator("section").filter({ has: page.getByRole("heading", { name: "Sales by size" }) }));
   await expect(panel).toBeVisible();
   await panel.getByLabel("Pricing group").selectOption({ label: `${GROUP} (max Rs. 4,000)` });
@@ -171,6 +186,29 @@ test("rules are validated, previewed per product, applied to matching sizes only
   expect(quote.status()).toBe(200);
   const q = await quote.json();
   expect(q.subtotal_paisa ?? q.quote?.subtotal_paisa).toBe(209650);
+
+  // One cost for every shoe in the group, while the size sale runs: costs set, no price changes.
+  await page.reload();
+  const costForm = vis(page.locator("form").filter({ hasText: "Same cost for every shoe in a group" }));
+  await costForm.getByRole("combobox", { name: "Group", exact: true }).selectOption({ label: `${GROUP} (7 shoes)` });
+  await costForm.getByLabel("Cost per pair (Rs.)").fill("1000");
+  await costForm.getByRole("button", { name: "Set cost for all" }).click();
+  await expect(costForm.getByText("Cost set to Rs. 1,000 for 7 shoe(s).")).toBeVisible();
+  const costs = await db!.query<{ cost_paisa: number | null }>("select cost_paisa from private.product_pricing where group_id = $1", [groupId]);
+  expect(costs.rows.map((r) => r.cost_paisa)).toEqual(Array(7).fill(100000));
+  expect(await prices(shoe("EU30").id)).toEqual({ price_paisa: 299500, sale_price_paisa: 209650, reference_price_paisa: 299500 });
+  expect(await prices(shoe("EU24").id)).toEqual({ price_paisa: 209500, sale_price_paisa: null, reference_price_paisa: null });
+  // The totals use it: 24 pairs × Rs. 1,000.
+  await page.reload();
+  const totalsAfter = vis(page.locator("section").filter({ has: page.getByRole("heading", { name: "Group totals" }) }))
+    .getByRole("row").filter({ has: page.getByRole("rowheader", { name: GROUP }) });
+  await expect(totalsAfter).toContainText("Rs. 24,000");
+  await expect(totalsAfter).not.toContainText("without a cost");
+  // Again: nothing to change.
+  await costForm.getByRole("combobox", { name: "Group", exact: true }).selectOption({ label: `${GROUP} (7 shoes)` });
+  await costForm.getByLabel("Cost per pair (Rs.)").fill("1000");
+  await costForm.getByRole("button", { name: "Set cost for all" }).click();
+  await expect(costForm.getByText("Cost set to Rs. 1,000 for 0 shoe(s). 7 already had that cost.")).toBeVisible();
 
   // End: regular prices back, no "Was".
   await page.reload();

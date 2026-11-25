@@ -6,7 +6,8 @@
   --color-forest-soft: #e7eee9;
   --color-lime: #c3e604;
   --color-lime-hover: #b3d400;
-  --color-hero: #123324;
+  /* The hero banner's mint playground (behind the copy on small screens). */
+  --color-hero: #b5dcaa;
   --color-cream: #f5f2ea;
   --color-sand: #ece7db;
   --color-ink: #17201b;

@@ -44,14 +44,14 @@ test.describe("merch QR redirect and links page", () => {
   test("/links stands alone: no shop header, footer, cart button or demo notice", async ({ request }) => {
     const page = markup(await (await request.get("/links")).text());
     expect(page).toContain("Kharch n Save");
-    expect(page).not.toMatch(/Demo storefront|Add to cart/i);
+    expect(page).not.toMatch(/Prices shown in Pakistani rupees|Add to cart/i);
     expect(page).not.toContain("site-search-desktop");
   });
 
   test("other pages keep the shop header and footer", async ({ request }) => {
     const page = markup(await (await request.get("/about")).text());
     expect(page).toContain("site-search-desktop");
-    expect(page).toContain("Demo storefront");
+    expect(page).toContain("Prices shown in Pakistani rupees");
   });
 
   test("/links has a title and a social preview on kharchnsave.pk", async ({ request }) => {

@@ -263,15 +263,21 @@ export const getCoverage = (s: AdminSessionClient) => read<Coverage>(s, "admin_s
 export const getScheduleHealth = (s: AdminSessionClient) => read<ScheduleHealth>(s, "admin_sale_schedule_health");
 export const getSizeSaleOverview = (s: AdminSessionClient, groupId: string) => read<SizeSaleOverview>(s, "admin_size_sale_overview", { p_group_id: groupId });
 
-/** Every EU size the products of a group come in, with how many products have it (for Sales by size). */
-export async function getGroupSizes(supabase: AdminSessionClient, groupId: string): Promise<{ size: number; products: number }[]> {
-  const ids: string[] = [];
+/** All of a group's non-archived products (every page). */
+export async function getGroupProducts(supabase: AdminSessionClient, groupId: string): Promise<PricingProduct[]> {
+  const items: PricingProduct[] = [];
   for (let offset = 0; ; offset += 500) {
-    const page = await read<{ total: number; items: { product_id: string }[] }>(supabase, "admin_pricing_products",
+    const page = await read<{ total: number; items: PricingProduct[] }>(supabase, "admin_pricing_products",
       { p_filter: { group_id: groupId, limit: 500, offset } });
-    ids.push(...page.items.map((i) => i.product_id));
+    items.push(...page.items);
     if (page.items.length < 500) break;
   }
+  return items;
+}
+
+/** Every EU size the given products (a group's) come in, with how many products have it (for Sales by size). */
+export async function getGroupSizes(supabase: AdminSessionClient, products: Pick<PricingProduct, "product_id">[]): Promise<{ size: number; products: number }[]> {
+  const ids = products.map((p) => p.product_id);
   const counts = new Map<number, Set<string>>();
   for (let i = 0; i < ids.length; i += 100) {
     const { data, error } = await supabase.from("product_variants").select("product_id, size_eu").in("product_id", ids.slice(i, i + 100)).abortSignal(readTimeout());

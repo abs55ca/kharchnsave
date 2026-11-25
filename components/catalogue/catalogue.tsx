@@ -9,6 +9,7 @@ import {
   type CatalogQuery,
 } from "@/lib/catalog/query";
 import { pluralize } from "@/lib/format";
+import { SOON_DEPARTMENTS } from "@/lib/site";
 import { CatalogueStateProvider, ResultsRegion } from "./catalogue-state";
 import { ActiveFilters, MobileFilters, SortSelect } from "./catalogue-toolbar";
 import { FilterPanel } from "./filter-panel";
@@ -34,6 +35,30 @@ function catalogueTitle(query: CatalogQuery, raw: RawSearchParams) {
 }
 
 function EmptyState({ query, facets, total }: { query: CatalogQuery; facets: Facets; total: number }) {
+  // Men's or women's shoes with no other filter: that department isn't open yet.
+  const soonDept =
+    query.categories.length === 1 && activeFilterCount(query) === 1 && !query.q
+      ? SOON_DEPARTMENTS.find((d) => d === query.categories[0])
+      : undefined;
+  if (soonDept) {
+    return (
+      <div className="rounded-lg border border-dashed border-line px-6 py-12 text-center">
+        <p className="eyebrow text-muted">Coming soon</p>
+        <h2 className="mt-2 text-lg font-bold">{DEPARTMENTS[soonDept].possessive} shoes are coming soon</h2>
+        <p className="mx-auto mt-2 max-w-md text-sm text-muted">
+          We&apos;re getting {DEPARTMENTS[soonDept].label.toLowerCase()}&apos;s pairs ready. In the meantime, have a look at our kids&apos; shoes.
+        </p>
+        <div className="mt-6 flex flex-wrap justify-center gap-2">
+          <Link href={DEPARTMENTS.kids.href} className="btn btn-forest">
+            {DEPARTMENTS.kids.title}
+          </Link>
+          <Link href="/coming-soon" className="btn btn-outline">
+            What else is coming
+          </Link>
+        </div>
+      </div>
+    );
+  }
   if (total === 0) {
     return (
       <div className="rounded-lg border border-dashed border-line px-6 py-12 text-center">

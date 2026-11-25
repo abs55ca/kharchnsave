@@ -8,15 +8,19 @@ export const SITE = {
     "Affordable pre-loved shoes for men and women, and brand-new shoes for kids, priced in Pakistani rupees.",
 };
 
-export type NavLink = { label: string; href: string };
+/** `soon`: shown with a "Soon" tag (nothing listed there yet). */
+export type NavLink = { label: string; href: string; soon?: boolean };
+
+/** Departments with nothing listed yet: "Soon" in the menus, a coming-soon page in the shop. */
+export const SOON_DEPARTMENTS = ["men", "women"] as const;
 
 export const MAIN_NAV: NavLink[] = [
-  { label: "Men", href: DEPARTMENTS.men.href },
-  { label: "Women", href: DEPARTMENTS.women.href },
+  { label: "Men", href: DEPARTMENTS.men.href, soon: true },
+  { label: "Women", href: DEPARTMENTS.women.href, soon: true },
   { label: "Kids", href: DEPARTMENTS.kids.href },
   // "newest" is the default sort; the explicit param titles the page "New Arrivals".
   { label: "New Arrivals", href: "/shop?sort=newest" },
-  { label: "Coming Soon", href: "/coming-soon" },
+  { label: "Coming Soon", href: "/coming-soon", soon: true },
 ];
 
 export const STYLE_NAV: NavLink[] = [

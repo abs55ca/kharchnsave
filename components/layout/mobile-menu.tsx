@@ -27,9 +27,14 @@ function LinkGroup({
             <Link
               href={link.href}
               onClick={onNavigate}
-              className="-mx-2 block rounded-md px-2 py-2 text-[15px] font-medium hover:bg-cream"
+              className="-mx-2 flex items-center gap-1.5 rounded-md px-2 py-2 text-[15px] font-medium hover:bg-cream"
             >
               {link.label}
+              {link.soon ? (
+                <span className="rounded-sm bg-cream px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
+                  Soon
+                </span>
+              ) : null}
             </Link>
           </li>
         ))}

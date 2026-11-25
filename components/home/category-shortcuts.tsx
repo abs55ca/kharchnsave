@@ -17,6 +17,7 @@ const SHORTCUTS = [
     shoe: 0.74,
     below: 0.134,
     tilt: -20,
+    soon: true,
   },
   {
     label: "Women",
@@ -27,6 +28,7 @@ const SHORTCUTS = [
     shoe: 0.745,
     below: 0.084,
     tilt: -17,
+    soon: true,
   },
   {
     label: "Kids",
@@ -37,6 +39,7 @@ const SHORTCUTS = [
     shoe: 0.705,
     below: 0.079,
     tilt: -15,
+    soon: false,
   },
 ];
 
@@ -97,6 +100,11 @@ export function CategoryShortcuts() {
                   {item.label}
                   <ChevronRightIcon className="size-4 transition-transform group-hover:translate-x-0.5 sm:size-5" />
                 </span>
+                {item.soon ? (
+                  <span className="mt-0.5 block text-center text-[10px] font-semibold uppercase tracking-wide text-muted sm:text-xs">
+                    Coming soon
+                  </span>
+                ) : null}
               </Link>
             </li>
           );

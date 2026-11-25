@@ -5,8 +5,10 @@ import { AccessNotice } from "@/components/admin/access-notice";
 import { AdminNav } from "@/components/admin/admin-nav";
 import { RequestScope } from "@/components/admin/agent-forms";
 import { BulkPricingTable, CreateGroupForm, GroupMaxEditor, SettingsForm } from "@/components/admin/pricing-forms";
+import { GroupCostForm } from "@/components/admin/group-cost-form";
 import { SizeSalesPanel } from "@/components/admin/size-sales-panel";
-import { getPricingOverview, getPricingProducts, getGroupSizes, getSizeSaleOverview, isMissingFunction, type PricingOverview, type PricingProduct } from "@/lib/admin/pricing";
+import { getPricingOverview, getPricingProducts, getGroupProducts, getGroupSizes, getSizeSaleOverview, isMissingFunction, type PricingGroup, type PricingOverview, type PricingProduct } from "@/lib/admin/pricing";
+import { groupTotals } from "@/lib/pricing/group-totals";
 import type { SizeSaleOverview } from "@/lib/pricing/size-sale-types";
 import { getAdminPageClient } from "@/lib/auth/admin";
 import { formatPrice } from "@/lib/format";
@@ -21,6 +23,81 @@ export default function PricingPage({ searchParams }: PageProps<"/admin/pricing"
     <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>
       <Pricing searchParams={searchParams} />
     </Suspense>
+  );
+}
+
+const money = (paisa: number) => formatPrice(paisa / 100);
+
+function GroupTotalsTable({ groups, products }: { groups: PricingGroup[]; products: Record<string, PricingProduct[] | null> }) {
+  if (groups.length === 0) return <p className="text-sm text-muted">No groups yet.</p>;
+  const th = "px-3 py-2 text-left font-semibold";
+  const td = "px-3 py-2 align-top";
+  return (
+    <div className="overflow-x-auto rounded-md border border-line">
+      <table className="w-full min-w-[720px] text-sm">
+        <thead className="bg-cream">
+          <tr>
+            <th scope="col" className={th}>Group</th>
+            <th scope="col" className={th}>Pairs in stock</th>
+            <th scope="col" className={th}>Total</th>
+            <th scope="col" className={th}>Average per pair</th>
+            <th scope="col" className={th}>Total cost</th>
+            <th scope="col" className={th}>Total after cost</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-line">
+          {groups.map((g) => {
+            const items = products[g.id];
+            if (!items) {
+              return (
+                <tr key={g.id}>
+                  <th scope="row" className={th}>{g.name}</th>
+                  <td colSpan={5} className={`${td} text-danger`}>Couldn&apos;t be loaded right now.</td>
+                </tr>
+              );
+            }
+            const t = groupTotals(items);
+            const allCosted = t.costedPairs === t.pairs;
+            return (
+              <tr key={g.id}>
+                <th scope="row" className={th}>{g.name}</th>
+                <td className={td}>
+                  {t.pairs}
+                  <span className="block text-xs text-muted">
+                    {t.listings} listing(s){t.drafts ? `, ${t.drafts} draft(s)` : ""}{t.soldOut ? `, ${t.soldOut} sold out` : ""}
+                  </span>
+                </td>
+                <td className={td}>
+                  <strong>{money(t.totalPaisa)}</strong>
+                  {t.regularTotalPaisa !== t.totalPaisa ? (
+                    <span className="block text-xs text-muted">{money(t.regularTotalPaisa)} at regular prices</span>
+                  ) : null}
+                </td>
+                <td className={td}>{t.averagePaisa === null ? "—" : money(t.averagePaisa)}</td>
+                <td className={td}>
+                  {t.costedPairs === 0 ? <span className="text-muted">No costs entered</span> : money(t.costPaisa)}
+                  {t.costedPairs > 0 && !allCosted ? (
+                    <span className="block text-xs text-muted">for the {t.costedPairs} of {t.pairs} pairs with a cost</span>
+                  ) : null}
+                </td>
+                <td className={td}>
+                  {t.afterCostPaisa === null ? (
+                    <span className="text-muted">—</span>
+                  ) : (
+                    <strong className={t.afterCostPaisa < 0 ? "text-danger" : "text-forest"}>{money(t.afterCostPaisa)}</strong>
+                  )}
+                  {t.afterCostPaisa !== null && !allCosted ? (
+                    <span className="block text-xs text-muted">
+                      {t.pairs - t.costedPairs} pair(s) without a cost left out ({money(t.totalPaisa - t.costedTotalPaisa)} of sales)
+                    </span>
+                  ) : null}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -47,6 +124,13 @@ async function Pricing({ searchParams }: Pick<PageProps<"/admin/pricing">, "sear
   } catch (error) {
     console.error("[admin]", (error as Error).message);
   }
+  // Each group's products: for the group totals and the sizes in Sales by size (null: couldn't be read).
+  const groupProducts: Record<string, PricingProduct[] | null> = overview
+    ? Object.fromEntries(await Promise.all(overview.groups.map(async (g) => [g.id, await getGroupProducts(supabase, g.id).catch((error) => {
+        console.error("[admin]", (error as Error).message);
+        return null;
+      })] as const)))
+    : {};
   // Optional on this page: without the size sales migration, only this section is unavailable.
   let sizeSales: Record<string, SizeSaleOverview> | null = null;
   let groupSizes: Record<string, { size: number; products: number }[]> = {};
@@ -56,7 +140,10 @@ async function Pricing({ searchParams }: Pick<PageProps<"/admin/pricing">, "sear
       const [list, sizes] = await Promise.all([
         Promise.all(overview.groups.map((g) => getSizeSaleOverview(supabase, g.id))),
         // Helpful, not essential: without it the panel just doesn't list the sizes.
-        Promise.all(overview.groups.map(async (g) => [g.id, await getGroupSizes(supabase, g.id).catch(() => null)] as const)),
+        Promise.all(overview.groups.map(async (g) => {
+          const items = groupProducts[g.id];
+          return [g.id, items ? await getGroupSizes(supabase, items).catch(() => null) : null] as const;
+        })),
       ]);
       sizeSales = Object.fromEntries(list.map((o) => [o.group_id, o]));
       groupSizes = Object.fromEntries(sizes.filter(([, v]) => v !== null)) as Record<string, { size: number; products: number }[]>;
@@ -99,6 +186,20 @@ async function Pricing({ searchParams }: Pick<PageProps<"/admin/pricing">, "sear
               <h2 id="groups-heading" className="text-lg font-bold">Groups and maximum prices</h2>
               <GroupMaxEditor groups={overview.groups} outOfDate={overview.counts.out_of_date} />
               <CreateGroupForm />
+            </section>
+
+            <section aria-labelledby="totals-heading" className="space-y-3">
+              <h2 id="totals-heading" className="text-lg font-bold">Group totals</h2>
+              <p className="text-sm text-muted">
+                Only for you: what every pair in stock in each group adds up to at the prices customers pay now (sale prices
+                where there are sales), the average per pair, and what&apos;s left after cost. Drafts are included; archived and
+                sold-out listings aren&apos;t.
+              </p>
+              <GroupTotalsTable groups={overview.groups} products={groupProducts} />
+              <GroupCostForm
+                groups={overview.groups}
+                shoes={Object.fromEntries(Object.entries(groupProducts).map(([id, items]) => [id, items?.length ?? 0]))}
+              />
             </section>
 
             <section aria-labelledby="size-sales-heading" className="space-y-4">

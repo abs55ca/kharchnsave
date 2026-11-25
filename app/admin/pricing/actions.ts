@@ -2,7 +2,8 @@
 
 import { refresh, updateTag } from "next/cache";
 import { answerForDbError, type BlockedReason } from "@/lib/admin/request-outcome";
-import { describePricingError, type CampaignPlan, type Plan } from "@/lib/admin/pricing";
+import { describePricingError, getGroupProducts, REASONS, type CampaignPlan, type Plan, type PricingProduct } from "@/lib/admin/pricing";
+import { formatPrice } from "@/lib/format";
 import { rupeesToPaisa } from "@/lib/admin/product-input";
 import { getAdminClient, type AdminSessionClient } from "@/lib/auth/admin";
 import { UUID_PATTERN } from "@/lib/catalog/photos";
@@ -172,6 +173,65 @@ export async function applyProductPricingAction(_previous: PricingFormState, for
   if (state) return state;
   if (answer!.result !== "stale") pricesChanged();
   return staleOrDone(answer!, `Applied to ${answer!.applied ?? 0} product(s).`);
+}
+
+/**
+ * One cost per pair for every shoe in a group (non-archived products). Only
+ * the cost changes: each product keeps its mode, score and prices. Done with
+ * the existing preview and apply, 200 products at a time; a product whose
+ * prices would also change (an out-of-date automatic price) is left alone and
+ * reported, so this never reprices anything.
+ */
+export async function setGroupCostAction(_previous: PricingFormState, formData: FormData): Promise<PricingFormState> {
+  const groupId = text(formData, "groupId");
+  const cost = rupeesToPaisa(text(formData, "cost"));
+  if (!UUID_PATTERN.test(groupId)) return OUT_OF_DATE;
+  if (cost === null) return { ok: false, message: "Enter the cost per pair in rupees, e.g. 1000." };
+  const supabase = await adminClient();
+  if (isState(supabase)) return supabase;
+
+  let products: PricingProduct[];
+  try {
+    products = await getGroupProducts(supabase, groupId);
+  } catch {
+    return { ok: false, uncertain: true, message: "The group's shoes couldn't be read. Nothing was changed; try again." };
+  }
+  if (products.length === 0) return { ok: false, message: "This group has no shoes yet." };
+
+  const item = (p: PricingProduct) => ({ product_id: p.product_id, mode: p.mode, group_id: p.group_id, score: p.score, cost_paisa: cost, giveaway: p.giveaway });
+  const samePrices = (l: Plan["lines"][number]) =>
+    l.from?.price_paisa === l.to?.price_paisa && l.from?.sale_price_paisa === l.to?.sale_price_paisa;
+  let applied = 0;
+  let already = 0;
+  const left: string[] = [];
+  for (let i = 0; i < products.length; i += 200) {
+    const batch = products.slice(i, i + 200);
+    let plan = await preview<Plan>("admin_preview_product_pricing", { p_items: batch.map(item) });
+    if (!plan.ok) return { ok: false, message: `${plan.message}${applied ? ` Cost already set for ${applied} shoe(s).` : ""}` };
+    const byId = new Map(plan.plan.lines.map((l) => [l.product_id, l]));
+    const keep = batch.filter((p) => {
+      const l = byId.get(p.product_id);
+      if (l?.action === "unchanged") already += 1;
+      else if (l?.action === "apply" && samePrices(l)) return true;
+      else left.push(`${p.item_code}: ${l?.action === "apply" ? "its automatic price is out of date (bring prices up to date first)" : REASONS[l?.reason ?? ""] ?? "couldn't be changed"}`);
+      return false;
+    });
+    if (keep.length === 0) continue;
+    if (keep.length !== batch.length) {
+      plan = await preview<Plan>("admin_preview_product_pricing", { p_items: keep.map(item) });
+      if (!plan.ok) return { ok: false, message: `${plan.message}${applied ? ` Cost already set for ${applied} shoe(s).` : ""}` };
+    }
+    const { state, answer } = await write("admin_apply_product_pricing",
+      { p_request_id: crypto.randomUUID(), p_items: keep.map(item), p_token: plan.plan.token }, "group cost");
+    if (state) return { ...state, message: `${state.message}${applied ? ` Cost already set for ${applied} shoe(s).` : ""}` };
+    if (answer!.result === "stale") return { ok: false, message: `Something changed while saving. ${applied ? `Cost set for ${applied} shoe(s) so far. ` : ""}Press Set cost again to finish.` };
+    applied += answer!.applied ?? 0;
+  }
+  refresh();
+  const parts = [`Cost set to ${formatPrice(cost / 100)} for ${applied} shoe(s).`];
+  if (already) parts.push(`${already} already had that cost.`);
+  if (left.length) parts.push(`${left.length} not changed: ${left.slice(0, 10).join("; ")}${left.length > 10 ? "; …" : ""}.`);
+  return { ok: left.length === 0, done: true, message: parts.join(" ") };
 }
 
 export async function applyRepriceAction(_previous: PricingFormState, formData: FormData): Promise<PricingFormState> {

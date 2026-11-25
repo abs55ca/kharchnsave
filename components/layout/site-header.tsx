@@ -54,7 +54,7 @@ export function SiteHeader() {
                   className="flex items-center gap-1.5 py-2 text-sm font-semibold text-ink hover:text-forest hover:underline hover:underline-offset-8 hover:decoration-lime hover:decoration-2"
                 >
                   {link.label}
-                  {link.href === "/coming-soon" ? (
+                  {link.soon ? (
                     <span className="rounded-sm bg-cream px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
                       Soon
                     </span>

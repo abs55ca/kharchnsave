@@ -11,6 +11,7 @@ function FooterColumn({ title, links }: { title: string; links: NavLink[] }) {
           <li key={link.href}>
             <Link href={link.href} className="text-white/85 hover:text-white hover:underline">
               {link.label}
+              {link.soon ? <span className="ml-1.5 text-xs text-white/60">(soon)</span> : null}
             </Link>
           </li>
         ))}
@@ -34,10 +35,7 @@ export function SiteFooter() {
       <div className="border-t border-white/15">
         <div className="container-page flex flex-col gap-2 py-5 text-xs text-white/70 md:flex-row md:items-center md:justify-between">
           <p>© Kharch n Save. Prices shown in Pakistani rupees (Rs.).</p>
-          <p>
-            Demo storefront: listings and photos are samples, and checkout is not yet
-            connected.
-          </p>
+          <p>Checkout is not yet connected.</p>
         </div>
       </div>
     </footer>

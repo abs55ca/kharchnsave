@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
-import { InfoIcon } from "@/components/icons";
 import { LightUpBadge, SaleBadge, StatusBadge } from "@/components/product/badges";
 import { ProductGrid } from "@/components/product/product-card";
 import { ProductGallery } from "@/components/product/product-gallery";
@@ -163,14 +162,6 @@ async function ProductDetails({ params }: Pick<PageProps<"/products/[slug]">, "p
               <dd>{product.itemCode}</dd>
             </dl>
           </section>
-
-          <p className="mt-8 flex gap-2 rounded-md border border-line p-3 text-xs leading-relaxed text-muted">
-            <InfoIcon width={16} height={16} className="mt-px shrink-0" />
-            <span>
-              Sample listing for the demo store. Photos are temporary stock images and
-              don&apos;t show an actual pair for sale.
-            </span>
-          </p>
         </div>
       </div>
 
