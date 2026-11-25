@@ -222,15 +222,17 @@ describe("1b. the price spread: SQL and lib/pricing/rules.ts agree", () => {
           expect(offset).toBeLessThanOrEqual(spread);
           const ts = scorePrice(max, score, 95, false, offset);
           expect({ status: r.c.status, calc: r.c.calculated_paisa, price: r.c.price_paisa, spread: r.c.spread_bp }, `${r.id} ${max} × ${score} at ${spread}`)
-            .toEqual({ status: ts.status, calc: ts.calculatedPaisa, price: ts.pricePaisa, spread: offset });
-          // Never above the price without a spread.
-          expect(r.c.calculated_paisa).toBeLessThanOrEqual(Math.floor((max * score) / 100));
+            .toEqual({ status: ts.status, calc: ts.calculatedPaisa, price: ts.pricePaisa, spread: ts.status === "ok" ? offset : 0 });
+          // Never above the price without a spread; whole rupees.
+          const plain = scorePrice(max, score, 95).pricePaisa;
+          if (plain !== null) expect(r.c.price_paisa!).toBeLessThanOrEqual(plain);
+          if (r.c.price_paisa !== null) expect(r.c.price_paisa % 100).toBe(0);
         }
       }
     }
     // Spread 0 is exactly the 4-argument calculation.
     const same = await db.query<{ a: unknown; b: unknown }>(
-      "select private.score_calculation($1, 37, false, 95) - 'spread_bp' as a, private.score_calculation($1, 37, false, 95, $2, 0) - 'spread_bp' as b", [rs(7000), ids[0]]);
+      "select private.score_calculation($1, 37, false, 95) - 'spread_bp' as a, private.score_calculation($1, 37, false, 95, $2, 0) - 'spread_bp' - 'score_price_paisa' as b", [rs(7000), ids[0]]);
     expect(same.rows[0].a).toEqual(same.rows[0].b);
   });
 });
@@ -487,8 +489,9 @@ describe("4. score pricing", () => {
     const prices = await Promise.all(shoes.map(async (p) => (await row(p.id)).price_paisa));
     expect(prices).toEqual(expected);
     expect(Math.max(...prices)).toBeLessThanOrEqual(rs(2995));
-    expect(Math.min(...prices)).toBeGreaterThanOrEqual(rs(2795)); // at most 5% below Rs. 3,000, then the ending
-    expect(new Set(prices).size).toBeGreaterThan(1);
+    expect(Math.min(...prices)).toBeGreaterThanOrEqual(rs(2845)); // at most 5% below Rs. 2,995
+    // Their own prices, not a few Rs. 100 steps: 30 shoes over Rs. 2,845–2,995.
+    expect(new Set(prices).size).toBeGreaterThan(15);
     // Repricing again moves nothing: each shoe's spread is fixed.
     const again = await admin<Plan>("select public.admin_preview_reprice('[]') as r");
     expect(again.lines.filter((l) => shoes.some((p) => p.id === l.product_id) && l.action === "apply")).toHaveLength(0);

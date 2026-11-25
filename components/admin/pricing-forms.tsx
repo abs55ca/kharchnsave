@@ -119,11 +119,11 @@ export function PriceEstimate({ maxPaisa, score, ending, giveaway = false, sprea
     <p className="text-sm">
       Estimated price <span className="text-lg font-bold">{rupees(r.pricePaisa)}</span>{" "}
       <span className="text-muted">
-        ({rupees(maxPaisa)} × {score}%{offset ? ` − this shoe’s ${formatBp(offset)} spread` : ""} = {rupees(r.calculatedPaisa)}, ending {ending})
+        ({rupees(maxPaisa)} × {score}% = {rupees(r.calculatedPaisa)}, ending {ending}{offset ? `, then this shoe’s ${formatBp(offset)} spread` : ""})
       </span>
       {spreadBp > 0 && !productId ? (
         <span className="block text-xs text-muted">
-          With the {formatBp(spreadBp)} price spread, each shoe then gets its own price up to {formatBp(spreadBp)} below this, so they don’t all look the same.
+          With the {formatBp(spreadBp)} price spread, each shoe then gets its own random % off this (0 to {formatBp(spreadBp)}, e.g. 2.37%), in whole rupees, so they don’t all look the same.
         </span>
       ) : null}
     </p>
@@ -271,8 +271,9 @@ export function SettingsForm({ settings }: { settings: PricingSettings }) {
             Price spread (%, 0 to 5)
             <input name="spread" inputMode="decimal" className={`${INPUT} mt-1 h-11 font-normal`} defaultValue={pct(settings.price_spread_bp)} placeholder="0" />
             <span className={HINT}>
-              So shoes in a group don’t all cost the same: each one’s automatic price is its own fixed amount, up to this much, below
-              its score price (then the price ending). It never goes above the group maximum. 0 turns it off.
+              So shoes in a group don’t all cost the same: each one gets its own random % off its score price (0 up to this, e.g.
+              2.37%), rounded down to whole rupees. It stays the same each time you reprice and never goes above the group maximum. 0
+              turns it off.
             </span>
           </label>
         ) : (

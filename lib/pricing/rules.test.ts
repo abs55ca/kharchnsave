@@ -188,13 +188,13 @@ describe("price spread", () => {
     expect(spreadOffsetBp("a7a7a7a7-0000-4000-8000-0000000001f4", 0)).toBe(0);
   });
 
-  it("takes the offset off before the price ending, and never goes above the score price", () => {
+  it("takes the offset off after the price ending, in whole rupees, never above the score price", () => {
     expect(scorePrice(rs(6000), 50, 95, false, 0)).toEqual(scorePrice(rs(6000), 50, 95));
-    // Rs. 3,000 less 5% = Rs. 2,850 → Rs. 2,795.
-    expect(scorePrice(rs(6000), 50, 95, false, 500)).toEqual({ status: "ok", calculatedPaisa: rs(2850), pricePaisa: rs(2795) });
-    // 1%: Rs. 2,970 → Rs. 2,895.
-    expect(scorePrice(rs(6000), 50, 95, false, 100).pricePaisa).toBe(rs(2895));
-    expect(scorePrice(rs(6000), 100, 95, false, 1).calculatedPaisa).toBeLessThan(rs(6000));
+    // Rs. 3,000 → Rs. 2,995 (the ending), less 5% = Rs. 2,845.25 → Rs. 2,845.
+    expect(scorePrice(rs(6000), 50, 95, false, 500)).toEqual({ status: "ok", calculatedPaisa: rs(3000), pricePaisa: rs(2845) });
+    // 2.37%: Rs. 4,495 → Rs. 4,388.47 → Rs. 4,388.
+    expect(scorePrice(rs(4500), 100, 95, false, 237).pricePaisa).toBe(rs(4388));
+    expect(scorePrice(rs(6000), 100, 95, false, 1).pricePaisa).toBe(rs(5994));
     expect(() => scorePrice(rs(6000), 50, 95, false, 501)).toThrow(RangeError);
   });
 });

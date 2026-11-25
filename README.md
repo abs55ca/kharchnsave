@@ -2219,13 +2219,14 @@ this feature has **not** been deployed, and no live sale has been started.
 **Pricing → Settings → Price spread (%, 0 to 5)** stops every shoe in a group at the same score
 from getting exactly the same price.
 
-- **The rule:** each product gets its own fixed offset, from 0 up to the spread, below its score
-  price: the last 8 hex digits of its id, as a number, mod (spread in basis points + 1). Then the
-  price ending as usual: calculated = floor(maximum × score × (10000 − offset) / 1 000 000).
-- **Only lower:** a score of 100 never goes above the group maximum.
+- **The rule:** each product gets its own fixed offset, from 0 up to the spread (in basis points,
+  e.g. 2.37%): the last 8 hex digits of its id, as a number, mod (spread in basis points + 1). It
+  comes off the score price AFTER the price ending, rounded down to whole rupees: price =
+  floor(score price × (10000 − offset) / 10000), e.g. Rs. 4,495 less 2.37% = Rs. 4,388
+  (`20261126120000_price_spread_after_ending.sql`; the first version took it off before the
+  ending, so most shoes still landed on the same Rs. 100 step).
+- **Only lower:** never above the score price, so never above the group maximum.
 - **Fixed per product:** repricing again never moves it, so prices don't jump around.
-- **With the 95 ending:** prices land on the Rs. 100 steps within the spread, e.g. a Rs. 3,000
-  score price with a 5% spread gives Rs. 2,795, Rs. 2,895 or Rs. 2,995.
 - **Nothing changes on save:** automatic prices show as out of date until **Review out-of-date
   automatic prices** is previewed and confirmed. Products in a running size sale are skipped (end
   it first, reprice, then apply the size sale again; its rules stay saved).
@@ -2234,7 +2235,7 @@ from getting exactly the same price.
   database for the instant estimate; `db-tests/pricing.test.ts` checks both agree.
 
 **Setup (owner).** Apply `20261125120000_price_spread.sql` (after every earlier migration, through
-`20261124120000_size_sales.sql`), then deploy. The setting starts at 0. Without the migration, the
+`20261124120000_size_sales.sql`), then `20261126120000_price_spread_after_ending.sql`, then deploy. The setting starts at 0. Without the migration, the
 Settings form says the spread needs it and everything else works as before.
 
 ## Enabling online payments
