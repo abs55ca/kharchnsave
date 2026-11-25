@@ -9,6 +9,8 @@ export type FreshFindsTab = {
   label: string;
   viewAllHref: string;
   viewAllLabel: string;
+  /** The button under the cards on phones, e.g. "View all shoes". */
+  bottomLabel: string;
   panel: React.ReactNode;
 };
 
@@ -92,6 +94,11 @@ export function FreshFindsTabs({
           {tab.panel}
         </div>
       ))}
+      {/* Phones: after scrolling through the cards, a way on without scrolling back up. */}
+      <Link href={current.viewAllHref} className="btn btn-outline mt-6 flex h-12 w-full items-center justify-center gap-2 md:hidden">
+        {current.bottomLabel}
+        <ChevronRightIcon width={16} height={16} />
+      </Link>
     </div>
   );
 }

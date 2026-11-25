@@ -30,6 +30,7 @@ export async function FreshFinds() {
       label: "All",
       viewAllHref: "/shop",
       viewAllLabel: "View all",
+      bottomLabel: "View all shoes",
       panel: <Panel products={all} />,
     },
     ...DEPARTMENT_ORDER.map((dept, i) => ({
@@ -37,6 +38,7 @@ export async function FreshFinds() {
       label: DEPARTMENTS[dept].label,
       viewAllHref: DEPARTMENTS[dept].href,
       viewAllLabel: `View all ${DEPARTMENTS[dept].label.toLowerCase()}`,
+      bottomLabel: `View all ${DEPARTMENTS[dept].possessive.toLowerCase()} shoes`,
       panel: <Panel products={byDepartment[i]} />,
     })),
   ];
